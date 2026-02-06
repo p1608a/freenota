@@ -156,15 +156,21 @@ export const Whiteboard: React.FC = () => {
         isDrawingRef.current = true;
 
         const rect = canvasRef.current.getBoundingClientRect();
-        const startPoint = {
-            x: e.clientX - rect.left,
-            y: e.clientY - rect.top,
-            pressure: e.pressure
-        };
+
+        // Process coalesced events from pen/stylus for the initial touch as well
+        const events = (e.nativeEvent as PointerEvent).getCoalescedEvents?.() || [e.nativeEvent];
+        pointsRef.current = [];
+
+        for (const ev of events) {
+            pointsRef.current.push({
+                x: ev.clientX - rect.left,
+                y: ev.clientY - rect.top,
+                pressure: ev.pressure
+            });
+        }
 
         if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') return;
 
-        pointsRef.current = [startPoint];
         drawActiveStroke();
     };
 
@@ -208,6 +214,7 @@ export const Whiteboard: React.FC = () => {
 
         if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') return;
 
+        // Save strokes even if they have only 1 point (a dot/tap)
         if (pointsRef.current.length > 0) {
             const isEraser = toolState.activeTool === 'eraser';
             const stroke: Stroke = {
@@ -283,6 +290,7 @@ export const Whiteboard: React.FC = () => {
                     onPointerMove={handlePointerMove}
                     onPointerUp={handlePointerUp}
                     onPointerLeave={handlePointerUp}
+                    onPointerCancel={handlePointerUp}
                 />
             </div>
         </div>

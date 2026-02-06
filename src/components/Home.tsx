@@ -59,7 +59,7 @@ export const Home: React.FC = () => {
                                     <span>{new Date(nb.lastModified).toLocaleDateString()}</span>
                                 </div>
 
-                                <div className="absolute bottom-4 right-4 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <div className="absolute bottom-4 right-4 flex gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
                                     <button
                                         onClick={(e) => {
                                             e.stopPropagation();
