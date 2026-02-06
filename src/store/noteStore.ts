@@ -85,6 +85,18 @@ interface AppState {
     loadFromStorage: () => Promise<void>;
 }
 
+// --- Persistence Helper ---
+let saveTimeout: any = null;
+const DEBOUNCE_MS = 2000;
+
+const scheduleSave = (notebooks: Notebook[]) => {
+    if (saveTimeout) clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(() => {
+        idbSet('freenota-data', notebooks).catch(err => console.error("Save failed", err));
+    }, DEBOUNCE_MS);
+};
+
+
 // --- Store ---
 
 export const useNoteStore = create<AppState>((set, get) => ({
@@ -118,7 +130,7 @@ export const useNoteStore = create<AppState>((set, get) => ({
                 pages: [{ id: crypto.randomUUID(), strokes: [] }]
             };
             const updatedNotebooks = [newNotebook, ...state.notebooks];
-            idbSet('freenota-data', updatedNotebooks);
+            scheduleSave(updatedNotebooks);
             return { notebooks: updatedNotebooks };
         });
     },
@@ -126,7 +138,7 @@ export const useNoteStore = create<AppState>((set, get) => ({
     deleteNotebook: (id) => {
         set(state => {
             const updated = state.notebooks.filter(n => n.id !== id);
-            idbSet('freenota-data', updated);
+            scheduleSave(updated);
             return { notebooks: updated };
         });
     },
@@ -164,7 +176,7 @@ export const useNoteStore = create<AppState>((set, get) => ({
         });
 
         set({ notebooks: updatedNotebooks, undoStack: newUndoStack, redoStack: newRedoStack });
-        idbSet('collanote-data', updatedNotebooks);
+        scheduleSave(updatedNotebooks);
     },
 
     redo: () => {
@@ -190,7 +202,7 @@ export const useNoteStore = create<AppState>((set, get) => ({
         });
 
         set({ notebooks: updatedNotebooks, undoStack: newUndoStack, redoStack: newRedoStack });
-        idbSet('collanote-data', updatedNotebooks);
+        scheduleSave(updatedNotebooks);
     },
 
     // --- Page Actions ---
@@ -210,7 +222,7 @@ export const useNoteStore = create<AppState>((set, get) => ({
             const activeNb = updatedNotebooks.find(n => n.id === state.activeNotebookId);
             const newActivePageId = activeNb?.pages[activeNb.pages.length - 1].id;
 
-            idbSet('freenota-data', updatedNotebooks);
+            scheduleSave(updatedNotebooks);
             // Clear history on page switch
             return { notebooks: updatedNotebooks, activePageId: newActivePageId, undoStack: [], redoStack: [] };
         });
@@ -226,7 +238,7 @@ export const useNoteStore = create<AppState>((set, get) => ({
                 return { ...nb, pages: nb.pages.filter(p => p.id !== pageId) };
             });
 
-            idbSet('freenota-data', updatedNotebooks);
+            scheduleSave(updatedNotebooks);
             // Clear history? Maybe safer.
             return { notebooks: updatedNotebooks, undoStack: [], redoStack: [] };
         });
@@ -239,27 +251,33 @@ export const useNoteStore = create<AppState>((set, get) => ({
             if (!state.activeNotebookId) return state;
 
             // Capture current state for Undo BEFORE update
+            // OPTIMIZATION: Don't deep clone EVERYTHING if we can avoid it.
+            // But Zustand updates are immutable.
+
             const activeNb = state.notebooks.find(n => n.id === state.activeNotebookId);
-            const activePg = activeNb?.pages.find(p => p.id === pageId);
-            const currentStrokes = activePg?.strokes || [];
+            const activeNbIndex = state.notebooks.findIndex(n => n.id === state.activeNotebookId);
+            if (!activeNb || activeNbIndex === -1) return state;
 
-            const newUndoStack = [...state.undoStack, currentStrokes];
+            const activePg = activeNb.pages.find(p => p.id === pageId);
+            const activePgIndex = activeNb.pages.findIndex(p => p.id === pageId);
+            if (!activePg || activePgIndex === -1) return state;
 
-            const updatedNotebooks = state.notebooks.map(nb => {
-                if (nb.id !== state.activeNotebookId) return nb;
+            // History management
+            const newUndoStack = [...state.undoStack, activePg.strokes];
 
-                return {
-                    ...nb,
-                    pages: nb.pages.map(p =>
-                        p.id === pageId
-                            ? { ...p, strokes: [...p.strokes, stroke] }
-                            : p
-                    )
-                };
-            });
+            // Selective update: Construct new arrays only for the path to the changed data
+            const newPage = { ...activePg, strokes: [...activePg.strokes, stroke] };
 
-            idbSet('freenota-data', updatedNotebooks);
-            return { notebooks: updatedNotebooks, undoStack: newUndoStack, redoStack: [] };
+            const newPages = [...activeNb.pages];
+            newPages[activePgIndex] = newPage;
+
+            const newNotebook = { ...activeNb, pages: newPages, lastModified: Date.now() };
+
+            const newNotebooks = [...state.notebooks];
+            newNotebooks[activeNbIndex] = newNotebook;
+
+            scheduleSave(newNotebooks);
+            return { notebooks: newNotebooks, undoStack: newUndoStack, redoStack: [] };
         });
     },
 
@@ -267,12 +285,12 @@ export const useNoteStore = create<AppState>((set, get) => ({
         set(state => {
             if (!state.activeNotebookId) return state;
 
-            // Capture Undo
             const activeNb = state.notebooks.find(n => n.id === state.activeNotebookId);
-            const activePg = activeNb?.pages.find(p => p.id === pageId);
-            const currentStrokes = activePg?.strokes || [];
+            if (!activeNb) return state;
+            const activePg = activeNb.pages.find(p => p.id === pageId);
+            if (!activePg) return state;
 
-            const newUndoStack = [...state.undoStack, currentStrokes];
+            const newUndoStack = [...state.undoStack, activePg.strokes];
 
             const updatedNotebooks = state.notebooks.map(nb => {
                 if (nb.id !== state.activeNotebookId) return nb;
@@ -283,11 +301,12 @@ export const useNoteStore = create<AppState>((set, get) => ({
                         p.id === pageId
                             ? { ...p, strokes: p.strokes.filter(s => s.id !== strokeId) }
                             : p
-                    )
+                    ),
+                    lastModified: Date.now()
                 };
             });
 
-            idbSet('freenota-data', updatedNotebooks);
+            scheduleSave(updatedNotebooks);
             return { notebooks: updatedNotebooks, undoStack: newUndoStack, redoStack: [] };
         });
     },
@@ -296,7 +315,6 @@ export const useNoteStore = create<AppState>((set, get) => ({
         set(state => {
             if (!state.activeNotebookId) return state;
 
-            // Capture Undo
             const activeNb = state.notebooks.find(n => n.id === state.activeNotebookId);
             const activePg = activeNb?.pages.find(p => p.id === pageId);
             const currentStrokes = activePg?.strokes || [];
@@ -307,11 +325,12 @@ export const useNoteStore = create<AppState>((set, get) => ({
                 if (nb.id !== state.activeNotebookId) return nb;
                 return {
                     ...nb,
-                    pages: nb.pages.map(p => p.id === pageId ? { ...p, strokes: [] } : p)
+                    pages: nb.pages.map(p => p.id === pageId ? { ...p, strokes: [] } : p),
+                    lastModified: Date.now()
                 };
             });
 
-            idbSet('freenota-data', updatedNotebooks);
+            scheduleSave(updatedNotebooks);
             return { notebooks: updatedNotebooks, undoStack: newUndoStack, redoStack: [] };
         });
     },
