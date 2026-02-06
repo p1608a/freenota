@@ -91,6 +91,7 @@ export const Whiteboard: React.FC = () => {
     const strokes = activePage?.strokes || [];
 
     const [currentStroke, setCurrentStroke] = useState<Stroke | null>(null);
+    const currentStrokeRef = useRef<Stroke | null>(null);
 
     if (!activeNotebook) return <div className="p-10 text-gray-400">No Notebook Open</div>;
 
@@ -116,7 +117,7 @@ export const Whiteboard: React.FC = () => {
         const isEraser = toolState.activeTool === 'eraser';
         const strokeColor = isEraser ? '#FFFFFF' : toolState.color;
 
-        setCurrentStroke({
+        const newStroke: Stroke = {
             id: crypto.randomUUID(),
             points: [startPoint],
             color: strokeColor,
@@ -124,7 +125,10 @@ export const Whiteboard: React.FC = () => {
             opacity: toolState.activeTool === 'highlighter' ? 0.3 : toolState.opacity,
             tool: toolState.activeTool,
             isComplete: false,
-        });
+        };
+
+        currentStrokeRef.current = newStroke;
+        setCurrentStroke(newStroke);
     };
 
     const handlePointerMove = (e: React.PointerEvent) => {
@@ -157,26 +161,28 @@ export const Whiteboard: React.FC = () => {
             return;
         }
 
-        if (!currentStroke) return;
+        if (!currentStrokeRef.current) return;
 
         // Optimization: Don't update state if point hasn't moved enough?
         // But perfect-freehand handles smoothing.
-        setCurrentStroke(prev => {
-            if (!prev) return null;
-            return {
-                ...prev,
-                points: [...prev.points, pt]
-            }
-        });
+        const updatedStroke = {
+            ...currentStrokeRef.current,
+            points: [...currentStrokeRef.current.points, pt]
+        };
+
+        currentStrokeRef.current = updatedStroke;
+        setCurrentStroke(updatedStroke);
     };
 
     const handlePointerUp = () => {
         if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') return;
 
-        if (!currentStroke) return;
+        if (!currentStrokeRef.current) return;
         if (activePageId) {
-            addStroke(activePageId, { ...currentStroke, isComplete: true });
+            addStroke(activePageId, { ...currentStrokeRef.current, isComplete: true });
         }
+
+        currentStrokeRef.current = null;
         setCurrentStroke(null);
     };
 
@@ -208,6 +214,7 @@ export const Whiteboard: React.FC = () => {
                     ref={svgRef}
                     className="w-full h-full touch-none"
                     style={{ cursor: getCursor() }}
+                    // Use pointer events, ensure touch-action is none (in class above)
                     onPointerDown={handlePointerDown}
                     onPointerMove={handlePointerMove}
                     onPointerUp={handlePointerUp}
