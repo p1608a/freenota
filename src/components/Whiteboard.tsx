@@ -173,23 +173,31 @@ export const Whiteboard: React.FC = () => {
         if (!isDrawingRef.current || !canvasRef.current || !currentActivePageId) return;
 
         const rect = canvasRef.current.getBoundingClientRect();
-        const pt = {
-            x: e.clientX - rect.left,
-            y: e.clientY - rect.top,
-            pressure: e.pressure
-        };
 
-        // Whole Eraser Logic
-        if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') {
-            const eraseRadius = toolState.eraserSize;
-            strokes.forEach(s => {
-                const hit = s.points.some((p, i) => i % 4 === 0 && Math.hypot(p.x - pt.x, p.y - pt.y) < eraseRadius);
-                if (hit) deleteStroke(currentActivePageId, s.id);
-            });
-            return;
+        // Styli often send multiple high-frequency events coalesced into one pointermove event.
+        // We unpack them to ensure extreme accuracy.
+        const events = (e.nativeEvent as PointerEvent).getCoalescedEvents?.() || [e.nativeEvent];
+
+        for (const ev of events) {
+            const pt = {
+                x: ev.clientX - rect.left,
+                y: ev.clientY - rect.top,
+                pressure: ev.pressure
+            };
+
+            // Whole Eraser Logic
+            if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') {
+                const eraseRadius = toolState.eraserSize;
+                strokes.forEach(s => {
+                    const hit = s.points.some((p, i) => i % 4 === 0 && Math.hypot(p.x - pt.x, p.y - pt.y) < eraseRadius);
+                    if (hit) deleteStroke(currentActivePageId, s.id);
+                });
+                continue; // Move to next coalesced point if any
+            }
+
+            pointsRef.current.push(pt);
         }
 
-        pointsRef.current.push(pt);
         requestAnimationFrame(drawActiveStroke);
     };
 
