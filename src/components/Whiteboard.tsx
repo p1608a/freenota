@@ -116,6 +116,18 @@ export const Whiteboard: React.FC = () => {
 
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+        // Handle single-point strokes (dots/taps)
+        if (pointsRef.current.length === 1) {
+            const pt = pointsRef.current[0];
+            const size = toolState.activeTool === 'eraser' ? toolState.eraserSize : toolState.size;
+            ctx.beginPath();
+            ctx.arc(pt.x, pt.y, size / 2, 0, Math.PI * 2);
+            ctx.fillStyle = toolState.activeTool === 'eraser' ? '#FFFFFF' : toolState.color;
+            ctx.globalAlpha = toolState.activeTool === 'highlighter' ? 0.3 : toolState.opacity;
+            ctx.fill();
+            return;
+        }
+
         if (pointsRef.current.length < 2) return;
 
         const outlinePoints = getStroke(pointsRef.current, {
@@ -148,6 +160,7 @@ export const Whiteboard: React.FC = () => {
     };
 
     const handlePointerDown = (e: React.PointerEvent) => {
+        e.preventDefault(); // Prevent browser default behaviors (scroll, selection)
         const currentActivePageId = activePageId;
         if (!canvasRef.current || !currentActivePageId) return;
         if (toolState.activeTool === 'select' || toolState.activeTool === 'laser') return;
@@ -175,6 +188,7 @@ export const Whiteboard: React.FC = () => {
     };
 
     const handlePointerMove = (e: React.PointerEvent) => {
+        e.preventDefault(); // Prevent browser default behaviors
         const currentActivePageId = activePageId;
         if (!isDrawingRef.current || !canvasRef.current || !currentActivePageId) return;
 
@@ -284,7 +298,7 @@ export const Whiteboard: React.FC = () => {
 
                 <canvas
                     ref={canvasRef}
-                    className="absolute inset-0 w-full h-full touch-none"
+                    className="absolute inset-0 w-full h-full touch-none select-none"
                     style={{ cursor: getCursor() }}
                     onPointerDown={handlePointerDown}
                     onPointerMove={handlePointerMove}
