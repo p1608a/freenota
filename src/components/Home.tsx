@@ -59,23 +59,23 @@ export const Home: React.FC = () => {
                                     <span>{new Date(nb.lastModified).toLocaleDateString()}</span>
                                 </div>
 
-                                <div className="absolute bottom-4 right-4 flex gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+                                <div className="absolute bottom-4 right-4 flex gap-1 bg-white/80 backdrop-blur-sm rounded-lg p-1 shadow-sm">
                                     <button
                                         onClick={(e) => {
                                             e.stopPropagation();
                                             exportNotebookToPdf(nb);
                                         }}
-                                        className="p-2 text-gray-300 hover:text-blue-500 hover:bg-blue-50 rounded-full transition-colors"
+                                        className="p-2 text-gray-600 hover:text-blue-600 hover:bg-blue-100 rounded-lg transition-colors"
                                         title="Export as PDF"
                                     >
-                                        <Download size={16} />
+                                        <Download size={18} />
                                     </button>
                                     <button
                                         onClick={(e) => { e.stopPropagation(); deleteNotebook(nb.id); }}
-                                        className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
+                                        className="p-2 text-gray-600 hover:text-red-600 hover:bg-red-100 rounded-lg transition-colors"
                                         title="Delete Notebook"
                                     >
-                                        <Trash2 size={16} />
+                                        <Trash2 size={18} />
                                     </button>
                                 </div>
                             </div>

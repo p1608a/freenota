@@ -161,6 +161,14 @@ export const Whiteboard: React.FC = () => {
 
     const handlePointerDown = (e: React.PointerEvent) => {
         e.preventDefault(); // Prevent browser default behaviors (scroll, selection)
+        e.stopPropagation();
+
+        // Palm rejection: ignore large touch areas (palms typically have width/height > 20)
+        const nativeEvent = e.nativeEvent as PointerEvent;
+        if (e.pointerType === 'touch' && (nativeEvent.width > 20 || nativeEvent.height > 20)) {
+            return; // Likely a palm, ignore
+        }
+
         const currentActivePageId = activePageId;
         if (!canvasRef.current || !currentActivePageId) return;
         if (toolState.activeTool === 'select' || toolState.activeTool === 'laser') return;
@@ -189,6 +197,14 @@ export const Whiteboard: React.FC = () => {
 
     const handlePointerMove = (e: React.PointerEvent) => {
         e.preventDefault(); // Prevent browser default behaviors
+        e.stopPropagation();
+
+        // Palm rejection
+        const nativeEvent = e.nativeEvent as PointerEvent;
+        if (e.pointerType === 'touch' && (nativeEvent.width > 20 || nativeEvent.height > 20)) {
+            return;
+        }
+
         const currentActivePageId = activePageId;
         if (!isDrawingRef.current || !canvasRef.current || !currentActivePageId) return;
 

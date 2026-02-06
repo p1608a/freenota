@@ -27,6 +27,11 @@ body {
   -ms-overflow-style: none;
   touch-action: none;
   /* Prevent default touch scrolling/zooming */
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+  /* Prevent text selection during drawing */
 }
 
 *::-webkit-scrollbar {
