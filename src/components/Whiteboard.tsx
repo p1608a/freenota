@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo } from "react";
+import React, { useRef, useMemo, useEffect } from "react";
 import { getStroke } from "perfect-freehand";
 import { getSvgPathFromStroke } from "../utils/ink";
 import { useNoteStore, type Stroke, type PaperSize, type PaperTemplate } from "../store/noteStore";
@@ -49,7 +49,7 @@ const getPatternStyle = (template: PaperTemplate) => {
     }
 };
 
-// Render logic detached to be reusable or memoizable
+// SVG Stroke for static items
 const StrokePath = React.memo(({ stroke }: { stroke: Stroke }) => {
     const outlinePoints = getStroke(stroke.points, {
         size: stroke.size,
@@ -82,30 +82,80 @@ const StaticStrokes = React.memo(({ strokes }: { strokes: Stroke[] }) => {
 
 
 export const Whiteboard: React.FC = () => {
-    const { notebooks, activeNotebookId, activePageId, addStroke, deleteStroke, toolState } = useNoteStore();
+    // Select only what we need to minimize re-renders
+    const notebooks = useNoteStore(state => state.notebooks);
+    const activeNotebookId = useNoteStore(state => state.activeNotebookId);
+    const activePageId = useNoteStore(state => state.activePageId);
+    const addStroke = useNoteStore(state => state.addStroke);
+    const deleteStroke = useNoteStore(state => state.deleteStroke);
+    const toolState = useNoteStore(state => state.toolState);
+
     const svgRef = useRef<SVGSVGElement>(null);
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+
+    // Active stroke tracking (Ref-based for speed)
+    const pointsRef = useRef<{ x: number, y: number, pressure: number }[]>([]);
+    const isDrawingRef = useRef(false);
 
     // Find the active notebook and page
-    const activeNotebook = notebooks.find(n => n.id === activeNotebookId);
-    const activePage = activeNotebook?.pages.find(p => p.id === activePageId);
+    const activeNotebook = useMemo(() => notebooks.find(n => n.id === activeNotebookId), [notebooks, activeNotebookId]);
+    const activePage = useMemo(() => activeNotebook?.pages.find(p => p.id === activePageId), [activeNotebook, activePageId]);
     const strokes = activePage?.strokes || [];
-
-    const [currentStroke, setCurrentStroke] = useState<Stroke | null>(null);
-    const currentStrokeRef = useRef<Stroke | null>(null);
 
     if (!activeNotebook) return <div className="p-10 text-gray-400">No Notebook Open</div>;
 
     const paperDims = getPaperDimensions(activeNotebook.paperSize);
     const isInfinite = activeNotebook.paperSize === 'infinite';
 
+    // Canvas drawing function
+    const drawActiveStroke = () => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        if (pointsRef.current.length < 2) return;
+
+        const outlinePoints = getStroke(pointsRef.current, {
+            size: toolState.activeTool === 'eraser' ? toolState.eraserSize : toolState.size,
+            thinning: toolState.activeTool === 'pen' ? 0.5 : 0,
+            smoothing: 0.5,
+            streamline: 0.5,
+            simulatePressure: toolState.activeTool !== 'highlighter',
+        });
+
+        if (outlinePoints.length < 3) return;
+
+        ctx.beginPath();
+        ctx.moveTo(outlinePoints[0][0], outlinePoints[0][1]);
+        for (let i = 1; i < outlinePoints.length; i++) {
+            ctx.lineTo(outlinePoints[i][0], outlinePoints[i][1]);
+        }
+        ctx.closePath();
+
+        ctx.fillStyle = toolState.activeTool === 'eraser' ? '#FFFFFF' : toolState.color;
+        ctx.globalAlpha = toolState.activeTool === 'highlighter' ? 0.3 : toolState.opacity;
+
+        if (toolState.activeTool === 'highlighter') {
+            ctx.globalCompositeOperation = 'multiply';
+        } else {
+            ctx.globalCompositeOperation = 'source-over';
+        }
+
+        ctx.fill();
+    };
+
     const handlePointerDown = (e: React.PointerEvent) => {
-        if (!svgRef.current || !activePageId) return;
+        const currentActivePageId = activePageId;
+        if (!canvasRef.current || !currentActivePageId) return;
         if (toolState.activeTool === 'select' || toolState.activeTool === 'laser') return;
 
         (e.target as Element).setPointerCapture(e.pointerId);
+        isDrawingRef.current = true;
 
-        const rect = svgRef.current.getBoundingClientRect();
-        // Use pressure if available, default to 0.5
+        const rect = canvasRef.current.getBoundingClientRect();
         const startPoint = {
             x: e.clientX - rect.left,
             y: e.clientY - rect.top,
@@ -114,30 +164,15 @@ export const Whiteboard: React.FC = () => {
 
         if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') return;
 
-        const isEraser = toolState.activeTool === 'eraser';
-        const strokeColor = isEraser ? '#FFFFFF' : toolState.color;
-
-        const newStroke: Stroke = {
-            id: crypto.randomUUID(),
-            points: [startPoint],
-            color: strokeColor,
-            size: isEraser ? toolState.eraserSize : toolState.size,
-            opacity: toolState.activeTool === 'highlighter' ? 0.3 : toolState.opacity,
-            tool: toolState.activeTool,
-            isComplete: false,
-        };
-
-        currentStrokeRef.current = newStroke;
-        setCurrentStroke(newStroke);
+        pointsRef.current = [startPoint];
+        drawActiveStroke();
     };
 
     const handlePointerMove = (e: React.PointerEvent) => {
-        if (!svgRef.current || !activePageId) return;
+        const currentActivePageId = activePageId;
+        if (!isDrawingRef.current || !canvasRef.current || !currentActivePageId) return;
 
-        // Optimize: Do not calculations if we are not dragging or erasing
-        if (e.buttons !== 1) return;
-
-        const rect = svgRef.current.getBoundingClientRect();
+        const rect = canvasRef.current.getBoundingClientRect();
         const pt = {
             x: e.clientX - rect.left,
             y: e.clientY - rect.top,
@@ -147,44 +182,60 @@ export const Whiteboard: React.FC = () => {
         // Whole Eraser Logic
         if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') {
             const eraseRadius = toolState.eraserSize;
-            // Throttle hit testing?
-            requestAnimationFrame(() => {
-                strokes.forEach(s => {
-                    // Optimization: Check bounding box first before all points?
-                    // For now, checking every 10th point might be faster?
-                    const hit = s.points.some((p, i) => i % 2 === 0 && Math.hypot(p.x - pt.x, p.y - pt.y) < eraseRadius);
-                    if (hit) {
-                        deleteStroke(activePageId, s.id);
-                    }
-                });
+            strokes.forEach(s => {
+                const hit = s.points.some((p, i) => i % 4 === 0 && Math.hypot(p.x - pt.x, p.y - pt.y) < eraseRadius);
+                if (hit) deleteStroke(currentActivePageId, s.id);
             });
             return;
         }
 
-        if (!currentStrokeRef.current) return;
-
-        // Optimization: Don't update state if point hasn't moved enough?
-        // But perfect-freehand handles smoothing.
-        const updatedStroke = {
-            ...currentStrokeRef.current,
-            points: [...currentStrokeRef.current.points, pt]
-        };
-
-        currentStrokeRef.current = updatedStroke;
-        setCurrentStroke(updatedStroke);
+        pointsRef.current.push(pt);
+        requestAnimationFrame(drawActiveStroke);
     };
 
     const handlePointerUp = () => {
+        const currentActivePageId = activePageId;
+        if (!isDrawingRef.current || !currentActivePageId) return;
+        isDrawingRef.current = false;
+
         if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') return;
 
-        if (!currentStrokeRef.current) return;
-        if (activePageId) {
-            addStroke(activePageId, { ...currentStrokeRef.current, isComplete: true });
+        if (pointsRef.current.length > 0) {
+            const isEraser = toolState.activeTool === 'eraser';
+            const stroke: Stroke = {
+                id: crypto.randomUUID(),
+                points: [...pointsRef.current],
+                color: isEraser ? '#FFFFFF' : toolState.color,
+                size: isEraser ? toolState.eraserSize : toolState.size,
+                opacity: toolState.activeTool === 'highlighter' ? 0.3 : toolState.opacity,
+                tool: toolState.activeTool,
+                isComplete: true
+            };
+            addStroke(currentActivePageId, stroke);
         }
 
-        currentStrokeRef.current = null;
-        setCurrentStroke(null);
+        const canvas = canvasRef.current;
+        if (canvas) {
+            const ctx = canvas.getContext('2d');
+            ctx?.clearRect(0, 0, canvas.width, canvas.height);
+        }
+        pointsRef.current = [];
     };
+
+    useEffect(() => {
+        const updateCanvasSize = () => {
+            if (canvasRef.current && (typeof paperDims.width === 'number' || isInfinite)) {
+                const rect = canvasRef.current.parentElement?.getBoundingClientRect();
+                if (rect) {
+                    canvasRef.current.width = rect.width;
+                    canvasRef.current.height = rect.height;
+                }
+            }
+        };
+        updateCanvasSize();
+        window.addEventListener('resize', updateCanvasSize);
+        return () => window.removeEventListener('resize', updateCanvasSize);
+    }, [paperDims, isInfinite]);
 
     const getCursor = () => {
         if (toolState.activeTool === 'eraser') {
@@ -192,7 +243,6 @@ export const Whiteboard: React.FC = () => {
             const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><circle cx="${size / 2}" cy="${size / 2}" r="${size / 2 - 1}" fill="none" stroke="black"/></svg>`;
             return `url('data:image/svg+xml;utf8,${encodeURIComponent(svg)}') ${size / 2} ${size / 2}, auto`;
         }
-        if (toolState.activeTool === 'select') return 'default';
         return 'crosshair';
     };
 
@@ -212,17 +262,20 @@ export const Whiteboard: React.FC = () => {
             >
                 <svg
                     ref={svgRef}
-                    className="w-full h-full touch-none"
+                    className="absolute inset-0 w-full h-full pointer-events-none"
+                >
+                    <StaticStrokes strokes={strokes} />
+                </svg>
+
+                <canvas
+                    ref={canvasRef}
+                    className="absolute inset-0 w-full h-full touch-none"
                     style={{ cursor: getCursor() }}
-                    // Use pointer events, ensure touch-action is none (in class above)
                     onPointerDown={handlePointerDown}
                     onPointerMove={handlePointerMove}
                     onPointerUp={handlePointerUp}
                     onPointerLeave={handlePointerUp}
-                >
-                    <StaticStrokes strokes={strokes} />
-                    {currentStroke && <StrokePath stroke={currentStroke} />}
-                </svg>
+                />
             </div>
         </div>
     );
