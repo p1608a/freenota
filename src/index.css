@@ -1,0 +1,34 @@
+@import "tailwindcss";
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  /* Important for a canvas app */
+  background-color: #F2F2F7;
+  color: #1a1a1a;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Hide scrollbars for infinite canvas feeling */
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  touch-action: none;
+  /* Prevent default touch scrolling/zooming */
+}
+
+*::-webkit-scrollbar {
+  display: none;
+}
