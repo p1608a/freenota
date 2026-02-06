@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useMemo } from "react";
 import { getStroke } from "perfect-freehand";
 import { getSvgPathFromStroke } from "../utils/ink";
 import { useNoteStore, type Stroke, type PaperSize, type PaperTemplate } from "../store/noteStore";
@@ -49,6 +49,37 @@ const getPatternStyle = (template: PaperTemplate) => {
     }
 };
 
+// Render logic detached to be reusable or memoizable
+const StrokePath = React.memo(({ stroke }: { stroke: Stroke }) => {
+    const outlinePoints = getStroke(stroke.points, {
+        size: stroke.size,
+        thinning: stroke.tool === 'pen' ? 0.5 : 0,
+        smoothing: 0.5,
+        streamline: 0.5,
+        simulatePressure: stroke.tool !== 'highlighter',
+    });
+    const pathData = getSvgPathFromStroke(outlinePoints);
+
+    return (
+        <path
+            d={pathData}
+            fill={stroke.color}
+            fillOpacity={stroke.opacity ?? 1}
+            style={{ mixBlendMode: stroke.tool === 'highlighter' ? 'multiply' : 'normal' }}
+        />
+    );
+});
+
+const StaticStrokes = React.memo(({ strokes }: { strokes: Stroke[] }) => {
+    return (
+        <g>
+            {strokes.map((stroke) => (
+                <StrokePath key={stroke.id} stroke={stroke} />
+            ))}
+        </g>
+    );
+});
+
 
 export const Whiteboard: React.FC = () => {
     const { notebooks, activeNotebookId, activePageId, addStroke, deleteStroke, toolState } = useNoteStore();
@@ -68,37 +99,22 @@ export const Whiteboard: React.FC = () => {
 
     const handlePointerDown = (e: React.PointerEvent) => {
         if (!svgRef.current || !activePageId) return;
-
-        // Block interaction if using utility tools that don't draw (like Select, if we were strictly mode-based, but for now select does nothing on down)
         if (toolState.activeTool === 'select' || toolState.activeTool === 'laser') return;
 
         (e.target as Element).setPointerCapture(e.pointerId);
 
         const rect = svgRef.current.getBoundingClientRect();
-        const startPoint = { x: e.clientX - rect.left, y: e.clientY - rect.top, pressure: e.pressure };
+        // Use pressure if available, default to 0.5
+        const startPoint = {
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top,
+            pressure: e.pressure
+        };
 
-        // Eraser Logic (Whole Eraser deletes on click/drag)
-        if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') {
-            // For now, let's just create a "erasing stroke" for visual feedback or handle click deletion. 
-            // Implementing "Swipe to Delete" by finding intersecting strokes is better.
-            // But for simplicity/MVP: "Partial Eraser" acts like a white pen. "Whole Eraser" acts like a delete tool on hover/click?
-            // User requested "Whole erase or partial".
-            // Let's implement Eraser as a "stroke" that, when finished, we calculating intersections?
-            // actually, deleting on click is safer for "Whole". Deleting on swipe is "Blade" mode.
-            // Let's treat Eraser as a tool that adds a stroke, but if it hits something, we remove it?
-            // Complex. Let's make Eraser draw transparent/white lines for 'partial' and actually delete for 'whole'.
+        if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') return;
 
-            // ... Actually, for "Whole Eraser", dragging across a line should delete it.
-            // I'll implement a simple hit-test loop in pointerMove for Whole Eraser.
-            return;
-        }
-
-        // Partial Eraser -> draws white (or background color)
-        // Pen/Pencil/Highlighter -> draws normal
         const isEraser = toolState.activeTool === 'eraser';
-        const strokeColor = isEraser ? '#FFFFFF' : toolState.color; // Assuming white paper for now
-        // Highlighter Logic: draw with opacity?
-        // NoteStore tracks opacity.
+        const strokeColor = isEraser ? '#FFFFFF' : toolState.color;
 
         setCurrentStroke({
             id: crypto.randomUUID(),
@@ -113,25 +129,38 @@ export const Whiteboard: React.FC = () => {
 
     const handlePointerMove = (e: React.PointerEvent) => {
         if (!svgRef.current || !activePageId) return;
-        const rect = svgRef.current.getBoundingClientRect();
-        const pt = { x: e.clientX - rect.left, y: e.clientY - rect.top, pressure: e.pressure };
 
-        // Whole Eraser Logic: Hit Test active strokes
-        if (e.buttons === 1 && toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') {
-            // Simple hitbox check: if point is close to any point in any stroke
+        // Optimize: Do not calculations if we are not dragging or erasing
+        if (e.buttons !== 1) return;
+
+        const rect = svgRef.current.getBoundingClientRect();
+        const pt = {
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top,
+            pressure: e.pressure
+        };
+
+        // Whole Eraser Logic
+        if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') {
             const eraseRadius = toolState.eraserSize;
-            strokes.forEach(s => {
-                // Sample points to improve performance?
-                const hit = s.points.some(p => Math.hypot(p.x - pt.x, p.y - pt.y) < eraseRadius);
-                if (hit) {
-                    deleteStroke(activePageId, s.id);
-                }
+            // Throttle hit testing?
+            requestAnimationFrame(() => {
+                strokes.forEach(s => {
+                    // Optimization: Check bounding box first before all points?
+                    // For now, checking every 10th point might be faster?
+                    const hit = s.points.some((p, i) => i % 2 === 0 && Math.hypot(p.x - pt.x, p.y - pt.y) < eraseRadius);
+                    if (hit) {
+                        deleteStroke(activePageId, s.id);
+                    }
+                });
             });
             return;
         }
 
-        if (e.buttons !== 1 || !currentStroke) return;
+        if (!currentStroke) return;
 
+        // Optimization: Don't update state if point hasn't moved enough?
+        // But perfect-freehand handles smoothing.
         setCurrentStroke(prev => {
             if (!prev) return null;
             return {
@@ -151,50 +180,19 @@ export const Whiteboard: React.FC = () => {
         setCurrentStroke(null);
     };
 
-    // Render logic
-    const renderStroke = (stroke: Stroke, key?: number | string) => {
-        const rawPoints = stroke.points.map(p => [p.x, p.y, p.pressure || 0.5]);
-        const options = {
-            size: stroke.size,
-            thinning: stroke.tool === 'pen' ? 0.5 : 0, // No thinning for marker-like feel if needed
-            smoothing: 0.5,
-            streamline: 0.5,
-            simulatePressure: stroke.tool !== 'highlighter', // Highlighters usually constant width
-        };
-
-        const outlinePoints = getStroke(rawPoints, options);
-        const pathData = getSvgPathFromStroke(outlinePoints);
-
-        return (
-            <path
-                key={key}
-                d={pathData}
-                fill={stroke.color}
-                fillOpacity={stroke.opacity ?? 1} // handle transparency
-                style={{ mixBlendMode: stroke.tool === 'highlighter' ? 'multiply' : 'normal' }} // Better highlighting
-            />
-        );
-    };
-
-    // Cursor Styling
     const getCursor = () => {
         if (toolState.activeTool === 'eraser') {
             const size = toolState.eraserSize;
-            // Simple circle cursor
             const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><circle cx="${size / 2}" cy="${size / 2}" r="${size / 2 - 1}" fill="none" stroke="black"/></svg>`;
             return `url('data:image/svg+xml;utf8,${encodeURIComponent(svg)}') ${size / 2} ${size / 2}, auto`;
         }
-        if (toolState.activeTool === 'select') return 'default'; // Or crosshair
-
-        // Pen cursor
+        if (toolState.activeTool === 'select') return 'default';
         return 'crosshair';
     };
 
     return (
         <div className="w-full h-full relative overflow-auto bg-gray-200 flex items-center justify-center p-8">
             <Toolbar />
-
-            {/* Paper Container */}
             <div
                 className={clsx(
                     "bg-white shadow-2xl transition-all relative",
@@ -203,7 +201,6 @@ export const Whiteboard: React.FC = () => {
                 style={{
                     width: typeof paperDims.width === 'number' ? `${paperDims.width}px` : paperDims.width,
                     height: typeof paperDims.height === 'number' ? `${paperDims.height}px` : paperDims.height,
-                    // Apply pattern styles
                     ...getPatternStyle(activeNotebook.paperTemplate)
                 }}
             >
@@ -216,8 +213,8 @@ export const Whiteboard: React.FC = () => {
                     onPointerUp={handlePointerUp}
                     onPointerLeave={handlePointerUp}
                 >
-                    {strokes.map((stroke, i) => renderStroke(stroke, stroke.id || i))}
-                    {currentStroke && renderStroke(currentStroke, "current")}
+                    <StaticStrokes strokes={strokes} />
+                    {currentStroke && <StrokePath stroke={currentStroke} />}
                 </svg>
             </div>
         </div>
