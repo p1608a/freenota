@@ -218,13 +218,28 @@ export const Toolbar: React.FC = () => {
                     )}
 
                     {/* Actions Row */}
-                    <div className="pt-2 border-t border-gray-100 flex justify-end">
+                    <div className="pt-2 border-t border-gray-100 flex justify-between items-center">
+                        {/* Finfer/Pen Toggle */}
+                        <button
+                            onClick={() => update({ onlyPen: !toolState.onlyPen })}
+                            className={clsx(
+                                "flex items-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors border",
+                                toolState.onlyPen
+                                    ? "bg-blue-50 text-blue-700 border-blue-200"
+                                    : "bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100"
+                            )}
+                            title={toolState.onlyPen ? "Pen Only Mode (Finger drawing disabled)" : "Touch Drawing Enabled"}
+                        >
+                            {toolState.onlyPen ? <Pen size={14} /> : <MousePointer2 size={14} />}
+                            {toolState.onlyPen ? "Pen Only" : "Touch Draw"}
+                        </button>
+
                         <button
                             onClick={() => activePageId && clearStrokes(activePageId)}
                             className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                         >
                             <Trash2 size={14} />
-                            Clear Page
+                            Clear
                         </button>
                     </div>
                 </div>

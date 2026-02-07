@@ -30,6 +30,7 @@ export interface ToolState {
     opacity: number;
     eraserMode: EraserMode;
     eraserSize: number;
+    onlyPen: boolean;
 }
 
 
@@ -111,6 +112,7 @@ export const useNoteStore = create<AppState>((set, get) => ({
         opacity: 1,
         eraserMode: 'whole',
         eraserSize: 10,
+        onlyPen: false, // Default: Finger drawing allowed
     },
     undoStack: [],
     redoStack: [],

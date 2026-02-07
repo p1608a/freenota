@@ -169,6 +169,9 @@ export const Whiteboard: React.FC = () => {
             return; // Likely a palm, ignore
         }
 
+        // Pen Only Mode: Ignore touch input if enabled
+        if (toolState.onlyPen && e.pointerType !== 'pen') return;
+
         const currentActivePageId = activePageId;
         if (!canvasRef.current || !currentActivePageId) return;
         if (toolState.activeTool === 'select' || toolState.activeTool === 'laser') return;
@@ -204,6 +207,9 @@ export const Whiteboard: React.FC = () => {
         if (e.pointerType === 'touch' && (nativeEvent.width > 20 || nativeEvent.height > 20)) {
             return;
         }
+
+        // Pen Only Mode
+        if (toolState.onlyPen && e.pointerType !== 'pen') return;
 
         const currentActivePageId = activePageId;
         if (!isDrawingRef.current || !canvasRef.current || !currentActivePageId) return;
