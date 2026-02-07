@@ -96,6 +96,7 @@ export const Whiteboard: React.FC = () => {
     // Active stroke tracking (Ref-based for speed)
     const pointsRef = useRef<{ x: number, y: number, pressure: number }[]>([]);
     const isDrawingRef = useRef(false);
+    const rafId = useRef<number | null>(null);
 
     // Find the active notebook and page
     const activeNotebook = useMemo(() => notebooks.find(n => n.id === activeNotebookId), [notebooks, activeNotebookId]);
@@ -240,7 +241,13 @@ export const Whiteboard: React.FC = () => {
             pointsRef.current.push(pt);
         }
 
-        requestAnimationFrame(drawActiveStroke);
+        // Throttle drawing to one frame per screen refresh
+        if (!rafId.current) {
+            rafId.current = requestAnimationFrame(() => {
+                drawActiveStroke();
+                rafId.current = null;
+            });
+        }
     };
 
     const handlePointerUp = () => {
@@ -263,6 +270,11 @@ export const Whiteboard: React.FC = () => {
                 isComplete: true
             };
             addStroke(currentActivePageId, stroke);
+        }
+
+        if (rafId.current) {
+            cancelAnimationFrame(rafId.current);
+            rafId.current = null;
         }
 
         const canvas = canvasRef.current;
