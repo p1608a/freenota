@@ -80,9 +80,8 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             const parent = canvas.parentElement;
             if (parent) {
                 const rect = parent.getBoundingClientRect();
-                canvas.width = rect.width;
-                canvas.height = rect.height;
-
+                // Can't set canvas.width/height here - worker has control after transferControlToOffscreen()
+                // Only send resize message to worker
                 workerRef.current?.postMessage({
                     type: 'resize',
                     data: { width: rect.width, height: rect.height }
