@@ -14,13 +14,13 @@ interface CanvasLayerProps {
 }
 
 /**
- * CanvasLayer - High-performance drawing layer with DECOUPLED state management
+ * CanvasLayer - Maximum performance drawing with DOUBLE BUFFERING
  * 
  * Architecture:
- * 1. Active stroke is drawn on the canvas during pointer events
- * 2. Completed strokes are buffered locally and rendered on canvas
- * 3. Strokes are synced to React/Zustand using requestIdleCallback
- * 4. This ensures input handling is NEVER blocked by React re-renders
+ * - Offscreen canvas stores ALL completed strokes as a single baked image
+ * - Main canvas only draws: offscreen image + current active stroke
+ * - When stroke completes, it's "baked" into offscreen canvas (one draw operation)
+ * - This means we NEVER re-render old strokes, achieving zero-latency input
  */
 export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     activePageId,
@@ -32,51 +32,67 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     onDeleteStroke
 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
+
+    // OFFSCREEN CANVAS - stores all completed strokes as a baked image
+    const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
     const pointsRef = useRef<{ x: number, y: number, pressure: number }[]>([]);
     const isDrawingRef = useRef(false);
     const rafId = useRef<number | null>(null);
     const activePointerIdRef = useRef<number | null>(null);
 
-    // LOCAL STROKE BUFFER - strokes that haven't been synced to React yet
-    // These are rendered directly on canvas for instant display
-    const pendingStrokesRef = useRef<Stroke[]>([]);
-    const syncTimeoutRef = useRef<number | null>(null);
+    // Track which strokes have been baked into offscreen canvas
+    const bakedStrokeIdsRef = useRef<Set<string>>(new Set());
 
-    // Store refs to current props for use in native event handlers
+    // Store refs to current props
     const toolStateRef = useRef(toolState);
     const activePageIdRef = useRef(activePageId);
     const strokesRef = useRef(strokes);
     const onStrokeCompleteRef = useRef(onStrokeComplete);
     const onDeleteStrokeRef = useRef(onDeleteStroke);
 
-    // Update refs when props change
     useEffect(() => { toolStateRef.current = toolState; }, [toolState]);
     useEffect(() => { activePageIdRef.current = activePageId; }, [activePageId]);
     useEffect(() => { strokesRef.current = strokes; }, [strokes]);
     useEffect(() => { onStrokeCompleteRef.current = onStrokeComplete; }, [onStrokeComplete]);
     useEffect(() => { onDeleteStrokeRef.current = onDeleteStroke; }, [onDeleteStroke]);
 
-    // Canvas resize handling
+    // Initialize offscreen canvas and handle resizing
     useEffect(() => {
         const updateCanvasSize = () => {
-            if (canvasRef.current) {
-                const parent = canvasRef.current.parentElement;
-                if (parent) {
-                    const rect = parent.getBoundingClientRect();
-                    canvasRef.current.width = rect.width;
-                    canvasRef.current.height = rect.height;
-                    // Re-render all strokes after resize
-                    renderAllStrokes();
-                }
+            const canvas = canvasRef.current;
+            if (!canvas) return;
+
+            const parent = canvas.parentElement;
+            if (!parent) return;
+
+            const rect = parent.getBoundingClientRect();
+            const newWidth = rect.width;
+            const newHeight = rect.height;
+
+            // Create or resize offscreen canvas
+            if (!offscreenCanvasRef.current) {
+                offscreenCanvasRef.current = document.createElement('canvas');
+            }
+
+            const offscreen = offscreenCanvasRef.current;
+
+            // If size changed, we need to re-bake all strokes
+            if (canvas.width !== newWidth || canvas.height !== newHeight) {
+                canvas.width = newWidth;
+                canvas.height = newHeight;
+                offscreen.width = newWidth;
+                offscreen.height = newHeight;
+
+                // Reset baked strokes - they'll be re-baked on next render
+                bakedStrokeIdsRef.current.clear();
+                rebakeAllStrokes();
             }
         };
 
         updateCanvasSize();
 
-        const resizeObserver = new ResizeObserver(() => {
-            updateCanvasSize();
-        });
-
+        const resizeObserver = new ResizeObserver(updateCanvasSize);
         if (canvasRef.current?.parentElement) {
             resizeObserver.observe(canvasRef.current.parentElement);
         }
@@ -88,28 +104,14 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         };
     }, [width, height]);
 
-    // Render ALL strokes (both synced and pending) on canvas
-    const renderAllStrokes = useCallback(() => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const ctx = canvas.getContext('2d');
+    // Bake a single stroke onto the offscreen canvas
+    const bakeStroke = useCallback((stroke: Stroke) => {
+        const offscreen = offscreenCanvasRef.current;
+        if (!offscreen) return;
+
+        const ctx = offscreen.getContext('2d');
         if (!ctx) return;
 
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        // Render synced strokes from React state
-        for (const stroke of strokesRef.current) {
-            renderStrokeOnCanvas(ctx, stroke);
-        }
-
-        // Render pending strokes (not yet synced to React)
-        for (const stroke of pendingStrokesRef.current) {
-            renderStrokeOnCanvas(ctx, stroke);
-        }
-    }, []);
-
-    // Render a single stroke on canvas
-    const renderStrokeOnCanvas = (ctx: CanvasRenderingContext2D, stroke: Stroke) => {
         if (stroke.points.length === 0) return;
 
         const outlinePoints = getStroke(stroke.points, {
@@ -127,7 +129,10 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
                 ctx.arc(stroke.points[0].x, stroke.points[0].y, stroke.size / 2, 0, Math.PI * 2);
                 ctx.fillStyle = stroke.color;
                 ctx.globalAlpha = stroke.opacity;
+                ctx.globalCompositeOperation = stroke.tool === 'highlighter' ? 'multiply' : 'source-over';
                 ctx.fill();
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.globalAlpha = 1;
             }
             return;
         }
@@ -145,33 +150,64 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         ctx.fill();
         ctx.globalCompositeOperation = 'source-over';
         ctx.globalAlpha = 1;
-    };
 
-    // Draw active stroke (while drawing)
-    const drawActiveStroke = useCallback(() => {
+        bakedStrokeIdsRef.current.add(stroke.id);
+    }, []);
+
+    // Rebake all strokes (used after resize or stroke deletion)
+    const rebakeAllStrokes = useCallback(() => {
+        const offscreen = offscreenCanvasRef.current;
+        if (!offscreen) return;
+
+        const ctx = offscreen.getContext('2d');
+        if (!ctx) return;
+
+        // Clear offscreen canvas
+        ctx.clearRect(0, 0, offscreen.width, offscreen.height);
+        bakedStrokeIdsRef.current.clear();
+
+        // Bake all strokes from React state
+        for (const stroke of strokesRef.current) {
+            bakeStroke(stroke);
+        }
+
+        // Render to main canvas
+        renderToMainCanvas();
+    }, [bakeStroke]);
+
+    // Render offscreen buffer + active stroke to main canvas
+    const renderToMainCanvas = useCallback(() => {
         const canvas = canvasRef.current;
-        const ts = toolStateRef.current;
-        if (!canvas) return;
+        const offscreen = offscreenCanvasRef.current;
+        if (!canvas || !offscreen) return;
+
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
-        // Clear and redraw all existing strokes
+        // Clear main canvas
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        // Render synced strokes
-        for (const stroke of strokesRef.current) {
-            renderStrokeOnCanvas(ctx, stroke);
-        }
+        // Draw offscreen buffer (all completed strokes)
+        ctx.drawImage(offscreen, 0, 0);
+    }, []);
 
-        // Render pending strokes
-        for (const stroke of pendingStrokesRef.current) {
-            renderStrokeOnCanvas(ctx, stroke);
-        }
+    // Draw active stroke on main canvas (on top of offscreen buffer)
+    const drawActiveStroke = useCallback(() => {
+        const canvas = canvasRef.current;
+        const offscreen = offscreenCanvasRef.current;
+        const ts = toolStateRef.current;
+        if (!canvas || !offscreen) return;
 
-        // Draw the active stroke (currently being drawn)
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        // Clear and draw offscreen buffer
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(offscreen, 0, 0);
+
+        // Draw active stroke on top
         if (pointsRef.current.length === 0) return;
 
-        // Handle single-point strokes (dots/taps)
         if (pointsRef.current.length === 1) {
             const pt = pointsRef.current[0];
             const size = ts.activeTool === 'eraser' ? ts.eraserSize : ts.size;
@@ -180,6 +216,7 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             ctx.fillStyle = ts.activeTool === 'eraser' ? '#FFFFFF' : ts.color;
             ctx.globalAlpha = ts.activeTool === 'highlighter' ? 0.3 : ts.opacity;
             ctx.fill();
+            ctx.globalAlpha = 1;
             return;
         }
 
@@ -208,22 +245,34 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         ctx.globalAlpha = 1;
     }, []);
 
-    // Sync pending strokes to React/Zustand (called during idle time)
-    const syncPendingStrokes = useCallback(() => {
-        if (pendingStrokesRef.current.length === 0) return;
+    // When strokes from React change, sync any new ones to offscreen canvas
+    useEffect(() => {
+        const offscreen = offscreenCanvasRef.current;
+        if (!offscreen) return;
 
-        // Use requestIdleCallback if available, otherwise setTimeout
-        const scheduleSync = window.requestIdleCallback || ((cb: () => void) => setTimeout(cb, 16));
+        // Check for deletions - if a baked stroke is no longer in strokes array, rebake all
+        const currentStrokeIds = new Set(strokes.map(s => s.id));
+        let needsRebake = false;
 
-        scheduleSync(() => {
-            const strokesToSync = [...pendingStrokesRef.current];
-            pendingStrokesRef.current = [];
-
-            for (const stroke of strokesToSync) {
-                onStrokeCompleteRef.current(stroke);
+        for (const bakedId of bakedStrokeIdsRef.current) {
+            if (!currentStrokeIds.has(bakedId)) {
+                needsRebake = true;
+                break;
             }
-        });
-    }, []);
+        }
+
+        if (needsRebake) {
+            rebakeAllStrokes();
+        } else {
+            // Just bake any new strokes
+            for (const stroke of strokes) {
+                if (!bakedStrokeIdsRef.current.has(stroke.id)) {
+                    bakeStroke(stroke);
+                }
+            }
+            renderToMainCanvas();
+        }
+    }, [strokes, bakeStroke, rebakeAllStrokes, renderToMainCanvas]);
 
     // Native event handlers
     useEffect(() => {
@@ -236,7 +285,6 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
 
             const ts = toolStateRef.current;
 
-            // Palm rejection
             if (e.pointerType === 'touch' && (e.width > 20 || e.height > 20)) return;
             if (ts.onlyPen && e.pointerType !== 'pen') return;
             if (!activePageIdRef.current) return;
@@ -284,18 +332,11 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
                     pressure: ev.pressure
                 };
 
-                // Whole Eraser Logic
                 if (ts.activeTool === 'eraser' && ts.eraserMode === 'whole') {
                     const eraseRadius = ts.eraserSize;
-                    // Check synced strokes
                     strokesRef.current.forEach(s => {
                         const hit = s.points.some((p, i) => i % 4 === 0 && Math.hypot(p.x - pt.x, p.y - pt.y) < eraseRadius);
                         if (hit) onDeleteStrokeRef.current(s.id);
-                    });
-                    // Check pending strokes
-                    pendingStrokesRef.current = pendingStrokesRef.current.filter(s => {
-                        const hit = s.points.some((p, i) => i % 4 === 0 && Math.hypot(p.x - pt.x, p.y - pt.y) < eraseRadius);
-                        return !hit;
                     });
                     continue;
                 }
@@ -303,12 +344,9 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
                 pointsRef.current.push(pt);
             }
 
-            if (ts.activeTool === 'eraser' && ts.eraserMode === 'whole') {
-                renderAllStrokes();
-                return;
-            }
+            if (ts.activeTool === 'eraser' && ts.eraserMode === 'whole') return;
 
-            // Throttled Drawing
+            // Throttled drawing
             if (!rafId.current) {
                 rafId.current = requestAnimationFrame(() => {
                     drawActiveStroke();
@@ -328,9 +366,7 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             if (pointerIdToRelease !== null) {
                 try {
                     canvas.releasePointerCapture(pointerIdToRelease);
-                } catch (err) {
-                    // Pointer may already be released
-                }
+                } catch (err) { }
             }
             activePointerIdRef.current = null;
 
@@ -346,15 +382,14 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             pointsRef.current = [];
 
             if (ts.activeTool === 'eraser' && ts.eraserMode === 'whole') {
-                renderAllStrokes();
+                renderToMainCanvas();
                 return;
             }
 
-            // Create stroke and add to LOCAL BUFFER (not React state)
             if (strokePoints.length > 0) {
                 const isEraser = ts.activeTool === 'eraser';
 
-                // Pre-compute the SVG path data
+                // Pre-compute pathData
                 const outlinePoints = getStroke(strokePoints, {
                     size: isEraser ? ts.eraserSize : ts.size,
                     thinning: ts.activeTool === 'pen' ? 0.5 : 0,
@@ -375,22 +410,19 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
                     pathData: pathData
                 };
 
-                // Add to LOCAL buffer and render immediately
-                pendingStrokesRef.current.push(stroke);
-                renderAllStrokes();
+                // IMMEDIATE: Bake stroke to offscreen canvas (one draw operation)
+                bakeStroke(stroke);
 
-                // Schedule sync to React during IDLE time
-                if (syncTimeoutRef.current) {
-                    clearTimeout(syncTimeoutRef.current);
-                }
-                syncTimeoutRef.current = window.setTimeout(() => {
-                    syncPendingStrokes();
-                    syncTimeoutRef.current = null;
-                }, 100); // Sync after 100ms of no new strokes
+                // Render to main canvas (just one drawImage call)
+                renderToMainCanvas();
+
+                // Defer sync to React
+                setTimeout(() => {
+                    onStrokeCompleteRef.current(stroke);
+                }, 0);
             }
         };
 
-        // Attach native event listeners
         canvas.addEventListener('pointerdown', handlePointerDown, { passive: false });
         canvas.addEventListener('pointermove', handlePointerMove, { passive: false });
         canvas.addEventListener('pointerup', handlePointerUp, { passive: false });
@@ -403,17 +435,8 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             canvas.removeEventListener('pointerup', handlePointerUp);
             canvas.removeEventListener('pointerleave', handlePointerUp);
             canvas.removeEventListener('pointercancel', handlePointerUp);
-
-            if (syncTimeoutRef.current) {
-                clearTimeout(syncTimeoutRef.current);
-            }
         };
-    }, [drawActiveStroke, renderAllStrokes, syncPendingStrokes]);
-
-    // Re-render when strokes from React state change
-    useEffect(() => {
-        renderAllStrokes();
-    }, [strokes, renderAllStrokes]);
+    }, [drawActiveStroke, bakeStroke, renderToMainCanvas]);
 
     const getCursor = () => {
         if (toolState.activeTool === 'eraser') {
