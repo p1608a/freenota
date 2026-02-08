@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useCallback } from 'react';
 import { getStroke } from 'perfect-freehand';
 import { type Stroke, type ToolState } from '../store/noteStore';
 
@@ -12,6 +12,13 @@ interface CanvasLayerProps {
     onDeleteStroke: (strokeId: string) => void;
 }
 
+/**
+ * CanvasLayer - High-performance drawing layer using NATIVE DOM events
+ * 
+ * Key insight: React synthetic events add latency that can cause dropped strokes
+ * during rapid pen input. By using native addEventListener directly on the canvas,
+ * we ensure the browser processes pointer events with minimal delay.
+ */
 export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     activePageId,
     toolState,
@@ -25,9 +32,23 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     const pointsRef = useRef<{ x: number, y: number, pressure: number }[]>([]);
     const isDrawingRef = useRef(false);
     const rafId = useRef<number | null>(null);
-    const activePointerIdRef = useRef<number | null>(null); // Track active pointer for proper release
+    const activePointerIdRef = useRef<number | null>(null);
 
-    // Initial canvas setup and resize handling
+    // Store refs to current props for use in native event handlers
+    const toolStateRef = useRef(toolState);
+    const activePageIdRef = useRef(activePageId);
+    const strokesRef = useRef(strokes);
+    const onStrokeCompleteRef = useRef(onStrokeComplete);
+    const onDeleteStrokeRef = useRef(onDeleteStroke);
+
+    // Update refs when props change
+    useEffect(() => { toolStateRef.current = toolState; }, [toolState]);
+    useEffect(() => { activePageIdRef.current = activePageId; }, [activePageId]);
+    useEffect(() => { strokesRef.current = strokes; }, [strokes]);
+    useEffect(() => { onStrokeCompleteRef.current = onStrokeComplete; }, [onStrokeComplete]);
+    useEffect(() => { onDeleteStrokeRef.current = onDeleteStroke; }, [onDeleteStroke]);
+
+    // Canvas resize handling
     useEffect(() => {
         const updateCanvasSize = () => {
             if (canvasRef.current) {
@@ -40,10 +61,8 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             }
         };
 
-        // Initial sizing
         updateCanvasSize();
 
-        // Resize observer for more robust resizing
         const resizeObserver = new ResizeObserver(() => {
             updateCanvasSize();
         });
@@ -59,9 +78,9 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         };
     }, [width, height]);
 
-
-    const drawActiveStroke = () => {
+    const drawActiveStroke = useCallback(() => {
         const canvas = canvasRef.current;
+        const ts = toolStateRef.current;
         if (!canvas) return;
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
@@ -71,11 +90,11 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         // Handle single-point strokes (dots/taps)
         if (pointsRef.current.length === 1) {
             const pt = pointsRef.current[0];
-            const size = toolState.activeTool === 'eraser' ? toolState.eraserSize : toolState.size;
+            const size = ts.activeTool === 'eraser' ? ts.eraserSize : ts.size;
             ctx.beginPath();
             ctx.arc(pt.x, pt.y, size / 2, 0, Math.PI * 2);
-            ctx.fillStyle = toolState.activeTool === 'eraser' ? '#FFFFFF' : toolState.color;
-            ctx.globalAlpha = toolState.activeTool === 'highlighter' ? 0.3 : toolState.opacity;
+            ctx.fillStyle = ts.activeTool === 'eraser' ? '#FFFFFF' : ts.color;
+            ctx.globalAlpha = ts.activeTool === 'highlighter' ? 0.3 : ts.opacity;
             ctx.fill();
             return;
         }
@@ -83,11 +102,11 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         if (pointsRef.current.length < 2) return;
 
         const outlinePoints = getStroke(pointsRef.current, {
-            size: toolState.activeTool === 'eraser' ? toolState.eraserSize : toolState.size,
-            thinning: toolState.activeTool === 'pen' ? 0.5 : 0,
+            size: ts.activeTool === 'eraser' ? ts.eraserSize : ts.size,
+            thinning: ts.activeTool === 'pen' ? 0.5 : 0,
             smoothing: 0.5,
             streamline: 0.5,
-            simulatePressure: toolState.activeTool !== 'highlighter',
+            simulatePressure: ts.activeTool !== 'highlighter',
         });
 
         if (outlinePoints.length < 3) return;
@@ -99,46 +118,53 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         }
         ctx.closePath();
 
-        ctx.fillStyle = toolState.activeTool === 'eraser' ? '#FFFFFF' : toolState.color;
-        ctx.globalAlpha = toolState.activeTool === 'highlighter' ? 0.3 : toolState.opacity;
+        ctx.fillStyle = ts.activeTool === 'eraser' ? '#FFFFFF' : ts.color;
+        ctx.globalAlpha = ts.activeTool === 'highlighter' ? 0.3 : ts.opacity;
 
-        if (toolState.activeTool === 'highlighter') {
+        if (ts.activeTool === 'highlighter') {
             ctx.globalCompositeOperation = 'multiply';
         } else {
             ctx.globalCompositeOperation = 'source-over';
         }
 
         ctx.fill();
-    };
+    }, []);
 
-    const handlePointerDown = (e: React.PointerEvent) => {
-        e.preventDefault(); // Critical: Prevent browser default behaviors
-        e.stopPropagation();
+    // ============================================================
+    // NATIVE EVENT HANDLERS - Attached via addEventListener
+    // This bypasses React's synthetic event system for lower latency
+    // ============================================================
 
-        // Palm rejection: ignore large touch areas
-        const nativeEvent = e.nativeEvent as PointerEvent;
-        if (e.pointerType === 'touch' && (nativeEvent.width > 20 || nativeEvent.height > 20)) {
-            return;
-        }
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
 
-        // Pen Only Mode logic
-        if (toolState.onlyPen && e.pointerType !== 'pen') return;
+        const handlePointerDown = (e: PointerEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
 
-        if (!activePageId) return;
-        if (toolState.activeTool === 'select' || toolState.activeTool === 'laser') return;
+            const ts = toolStateRef.current;
 
-        // If we're already tracking a pointer, ignore new pointerdown events
-        // This prevents interference from duplicate events (mouse + touch + pointer)
-        if (activePointerIdRef.current !== null) return;
+            // Palm rejection: ignore large touch areas
+            if (e.pointerType === 'touch' && (e.width > 20 || e.height > 20)) {
+                return;
+            }
 
-        (e.target as Element).setPointerCapture(e.pointerId);
-        activePointerIdRef.current = e.pointerId; // Store pointer ID for release
-        isDrawingRef.current = true;
+            // Pen Only Mode logic
+            if (ts.onlyPen && e.pointerType !== 'pen') return;
 
-        if (canvasRef.current) {
-            const rect = canvasRef.current.getBoundingClientRect();
-            // Process coalesced events
-            const events = (e.nativeEvent as PointerEvent).getCoalescedEvents?.() || [e.nativeEvent];
+            if (!activePageIdRef.current) return;
+            if (ts.activeTool === 'select' || ts.activeTool === 'laser') return;
+
+            // If we're already tracking a pointer, ignore new pointerdown events
+            if (activePointerIdRef.current !== null) return;
+
+            canvas.setPointerCapture(e.pointerId);
+            activePointerIdRef.current = e.pointerId;
+            isDrawingRef.current = true;
+
+            const rect = canvas.getBoundingClientRect();
+            const events = e.getCoalescedEvents?.() || [e];
             pointsRef.current = [];
 
             for (const ev of events) {
@@ -148,119 +174,125 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
                     pressure: ev.pressure
                 });
             }
-        }
 
+            if (ts.activeTool === 'eraser' && ts.eraserMode === 'whole') return;
 
-        if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') return;
+            drawActiveStroke();
+        };
 
-        // Immediate draw for responsiveness
-        drawActiveStroke();
-    };
+        const handlePointerMove = (e: PointerEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
 
-    const handlePointerMove = (e: React.PointerEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
+            const ts = toolStateRef.current;
 
-        const nativeEvent = e.nativeEvent as PointerEvent;
-        if (e.pointerType === 'touch' && (nativeEvent.width > 20 || nativeEvent.height > 20)) return;
-        if (toolState.onlyPen && e.pointerType !== 'pen') return;
+            if (e.pointerType === 'touch' && (e.width > 20 || e.height > 20)) return;
+            if (ts.onlyPen && e.pointerType !== 'pen') return;
 
-        if (!isDrawingRef.current || !activePageId || !canvasRef.current) return;
+            if (!isDrawingRef.current || !activePageIdRef.current) return;
 
-        const rect = canvasRef.current.getBoundingClientRect();
-        const events = (e.nativeEvent as PointerEvent).getCoalescedEvents?.() || [e.nativeEvent];
+            const rect = canvas.getBoundingClientRect();
+            const events = e.getCoalescedEvents?.() || [e];
 
-        for (const ev of events) {
-            const pt = {
-                x: ev.clientX - rect.left,
-                y: ev.clientY - rect.top,
-                pressure: ev.pressure
-            };
+            for (const ev of events) {
+                const pt = {
+                    x: ev.clientX - rect.left,
+                    y: ev.clientY - rect.top,
+                    pressure: ev.pressure
+                };
 
-            // Whole Eraser Logic
-            if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') {
-                const eraseRadius = toolState.eraserSize;
-                // Check against existing strokes (passed via props)
-                strokes.forEach(s => {
-                    const hit = s.points.some((p, i) => i % 4 === 0 && Math.hypot(p.x - pt.x, p.y - pt.y) < eraseRadius);
-                    if (hit) onDeleteStroke(s.id);
+                // Whole Eraser Logic
+                if (ts.activeTool === 'eraser' && ts.eraserMode === 'whole') {
+                    const eraseRadius = ts.eraserSize;
+                    strokesRef.current.forEach(s => {
+                        const hit = s.points.some((p, i) => i % 4 === 0 && Math.hypot(p.x - pt.x, p.y - pt.y) < eraseRadius);
+                        if (hit) onDeleteStrokeRef.current(s.id);
+                    });
+                    continue;
+                }
+
+                pointsRef.current.push(pt);
+            }
+
+            if (ts.activeTool === 'eraser' && ts.eraserMode === 'whole') return;
+
+            // Throttled Drawing
+            if (!rafId.current) {
+                rafId.current = requestAnimationFrame(() => {
+                    drawActiveStroke();
+                    rafId.current = null;
                 });
-                continue;
             }
+        };
 
-            pointsRef.current.push(pt);
-        }
+        const handlePointerUp = (e: PointerEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
 
-        if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') return;
+            const ts = toolStateRef.current;
 
-        // Throttled Drawing
-        if (!rafId.current) {
-            rafId.current = requestAnimationFrame(() => {
-                drawActiveStroke();
+            // CRITICAL: Release pointer capture FIRST
+            const pointerIdToRelease = activePointerIdRef.current;
+            if (pointerIdToRelease !== null) {
+                try {
+                    canvas.releasePointerCapture(pointerIdToRelease);
+                } catch (err) {
+                    // Pointer may already be released
+                }
+            }
+            activePointerIdRef.current = null;
+
+            if (!isDrawingRef.current || !activePageIdRef.current) return;
+            isDrawingRef.current = false;
+
+            if (rafId.current) {
+                cancelAnimationFrame(rafId.current);
                 rafId.current = null;
-            });
-        }
-    };
-
-    const handlePointerUp = (e: React.PointerEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        // CRITICAL: Release pointer capture FIRST - this must happen before anything else
-        // to allow the browser to immediately accept the next pointerdown event
-        const pointerIdToRelease = activePointerIdRef.current;
-        if (pointerIdToRelease !== null && canvasRef.current) {
-            try {
-                canvasRef.current.releasePointerCapture(pointerIdToRelease);
-            } catch (err) {
-                // Pointer may already be released
             }
-        }
-        activePointerIdRef.current = null;
 
-        if (!isDrawingRef.current || !activePageId) return;
-        isDrawingRef.current = false;
+            // Clear canvas immediately
+            const ctx = canvas.getContext('2d');
+            ctx?.clearRect(0, 0, canvas.width, canvas.height);
 
-        if (rafId.current) {
-            cancelAnimationFrame(rafId.current);
-            rafId.current = null;
-        }
+            // Capture points before clearing
+            const strokePoints = [...pointsRef.current];
+            pointsRef.current = [];
 
-        // Clear canvas immediately for visual responsiveness
-        if (canvasRef.current) {
-            const ctx = canvasRef.current.getContext('2d');
-            ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-        }
+            if (ts.activeTool === 'eraser' && ts.eraserMode === 'whole') {
+                return;
+            }
 
-        // Capture points before clearing
-        const strokePoints = [...pointsRef.current];
-        pointsRef.current = [];
+            // Commit stroke - no setTimeout needed with native events
+            if (strokePoints.length > 0) {
+                const isEraser = ts.activeTool === 'eraser';
+                const stroke: Stroke = {
+                    id: crypto.randomUUID(),
+                    points: strokePoints,
+                    color: isEraser ? '#FFFFFF' : ts.color,
+                    size: isEraser ? ts.eraserSize : ts.size,
+                    opacity: ts.activeTool === 'highlighter' ? 0.3 : ts.opacity,
+                    tool: ts.activeTool,
+                    isComplete: true
+                };
+                onStrokeCompleteRef.current(stroke);
+            }
+        };
 
-        if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') {
-            return;
-        }
+        // Attach native event listeners with { passive: false } for preventDefault to work
+        canvas.addEventListener('pointerdown', handlePointerDown, { passive: false });
+        canvas.addEventListener('pointermove', handlePointerMove, { passive: false });
+        canvas.addEventListener('pointerup', handlePointerUp, { passive: false });
+        canvas.addEventListener('pointerleave', handlePointerUp, { passive: false });
+        canvas.addEventListener('pointercancel', handlePointerUp, { passive: false });
 
-        // CRITICAL: Defer the stroke commit using setTimeout(0)
-        // This allows the browser's event loop to process any pending pointerdown
-        // events BEFORE React triggers a re-render from the state update
-        if (strokePoints.length > 0) {
-            const isEraser = toolState.activeTool === 'eraser';
-            const stroke: Stroke = {
-                id: crypto.randomUUID(),
-                points: strokePoints,
-                color: isEraser ? '#FFFFFF' : toolState.color,
-                size: isEraser ? toolState.eraserSize : toolState.size,
-                opacity: toolState.activeTool === 'highlighter' ? 0.3 : toolState.opacity,
-                tool: toolState.activeTool,
-                isComplete: true
-            };
-
-            // Defer to next event loop tick - browser can process next pointerdown first
-            setTimeout(() => {
-                onStrokeComplete(stroke);
-            }, 0);
-        }
-    };
+        return () => {
+            canvas.removeEventListener('pointerdown', handlePointerDown);
+            canvas.removeEventListener('pointermove', handlePointerMove);
+            canvas.removeEventListener('pointerup', handlePointerUp);
+            canvas.removeEventListener('pointerleave', handlePointerUp);
+            canvas.removeEventListener('pointercancel', handlePointerUp);
+        };
+    }, [drawActiveStroke]);
 
     const getCursor = () => {
         if (toolState.activeTool === 'eraser') {
@@ -277,13 +309,9 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             className="absolute inset-0 w-full h-full touch-none select-none"
             style={{
                 cursor: getCursor(),
-                touchAction: 'none' // double insurance
+                touchAction: 'none'
             }}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerLeave={handlePointerUp}
-            onPointerCancel={handlePointerUp}
+        // No React event handlers - we use native addEventListener above
         />
     );
 });
