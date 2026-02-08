@@ -1,6 +1,4 @@
 import React, { useRef, useEffect, useCallback } from 'react';
-import { getStroke } from 'perfect-freehand';
-import { getSvgPathFromStroke } from '../utils/ink';
 import { type Stroke, type ToolState } from '../store/noteStore';
 
 interface CanvasLayerProps {
@@ -14,13 +12,45 @@ interface CanvasLayerProps {
 }
 
 /**
- * CanvasLayer - Maximum performance drawing with DOUBLE BUFFERING
+ * Generate SVG path data using quadratic bezier curves (Amanote-style)
+ * Much simpler and faster than perfect-freehand polygon calculations
+ */
+function generateSmoothPath(points: { x: number, y: number, pressure?: number }[]): string {
+    if (points.length === 0) return '';
+    if (points.length === 1) {
+        return `M ${points[0].x} ${points[0].y} L ${points[0].x} ${points[0].y}`;
+    }
+    if (points.length === 2) {
+        return `M ${points[0].x} ${points[0].y} L ${points[1].x},${points[1].y}`;
+    }
+
+    // Start at first point
+    let path = `M ${points[0].x} ${points[0].y}`;
+
+    // Use quadratic bezier curves for smooth connections
+    for (let i = 1; i < points.length - 1; i++) {
+        const p0 = points[i];
+        const p1 = points[i + 1];
+        // Midpoint between current and next point
+        const midX = (p0.x + p1.x) / 2;
+        const midY = (p0.y + p1.y) / 2;
+        // Quadratic bezier: Q controlX,controlY endX,endY
+        path += ` Q ${p0.x},${p0.y} ${midX},${midY}`;
+    }
+
+    // End at last point
+    const lastPoint = points[points.length - 1];
+    path += ` L ${lastPoint.x},${lastPoint.y}`;
+
+    return path;
+}
+
+/**
+ * CanvasLayer - Hybrid rendering with SVG paths (Amanote-style)
  * 
- * Architecture:
- * - Offscreen canvas stores ALL completed strokes as a single baked image
- * - Main canvas only draws: offscreen image + current active stroke
- * - When stroke completes, it's "baked" into offscreen canvas (one draw operation)
- * - This means we NEVER re-render old strokes, achieving zero-latency input
+ * Key insight from Amanote: Use SVG <path> with stroke attribute and
+ * quadratic bezier curves. This is MUCH faster than perfect-freehand
+ * because there's no polygon calculation - just simple path building.
  */
 export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     activePageId,
@@ -32,17 +62,12 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     onDeleteStroke
 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-
-    // OFFSCREEN CANVAS - stores all completed strokes as a baked image
-    const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const svgRef = useRef<SVGSVGElement>(null);
 
     const pointsRef = useRef<{ x: number, y: number, pressure: number }[]>([]);
     const isDrawingRef = useRef(false);
     const rafId = useRef<number | null>(null);
     const activePointerIdRef = useRef<number | null>(null);
-
-    // Track which strokes have been baked into offscreen canvas
-    const bakedStrokeIdsRef = useRef<Set<string>>(new Set());
 
     // Store refs to current props
     const toolStateRef = useRef(toolState);
@@ -57,36 +82,16 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     useEffect(() => { onStrokeCompleteRef.current = onStrokeComplete; }, [onStrokeComplete]);
     useEffect(() => { onDeleteStrokeRef.current = onDeleteStroke; }, [onDeleteStroke]);
 
-    // Initialize offscreen canvas and handle resizing
+    // Canvas resize handling
     useEffect(() => {
         const updateCanvasSize = () => {
-            const canvas = canvasRef.current;
-            if (!canvas) return;
-
-            const parent = canvas.parentElement;
-            if (!parent) return;
-
-            const rect = parent.getBoundingClientRect();
-            const newWidth = rect.width;
-            const newHeight = rect.height;
-
-            // Create or resize offscreen canvas
-            if (!offscreenCanvasRef.current) {
-                offscreenCanvasRef.current = document.createElement('canvas');
-            }
-
-            const offscreen = offscreenCanvasRef.current;
-
-            // If size changed, we need to re-bake all strokes
-            if (canvas.width !== newWidth || canvas.height !== newHeight) {
-                canvas.width = newWidth;
-                canvas.height = newHeight;
-                offscreen.width = newWidth;
-                offscreen.height = newHeight;
-
-                // Reset baked strokes - they'll be re-baked on next render
-                bakedStrokeIdsRef.current.clear();
-                rebakeAllStrokes();
+            if (canvasRef.current) {
+                const parent = canvasRef.current.parentElement;
+                if (parent) {
+                    const rect = parent.getBoundingClientRect();
+                    canvasRef.current.width = rect.width;
+                    canvasRef.current.height = rect.height;
+                }
             }
         };
 
@@ -104,175 +109,62 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         };
     }, [width, height]);
 
-    // Bake a single stroke onto the offscreen canvas
-    const bakeStroke = useCallback((stroke: Stroke) => {
-        const offscreen = offscreenCanvasRef.current;
-        if (!offscreen) return;
-
-        const ctx = offscreen.getContext('2d');
-        if (!ctx) return;
-
-        if (stroke.points.length === 0) return;
-
-        const outlinePoints = getStroke(stroke.points, {
-            size: stroke.size,
-            thinning: stroke.tool === 'pen' ? 0.5 : 0,
-            smoothing: 0.5,
-            streamline: 0.5,
-            simulatePressure: stroke.tool !== 'highlighter',
-        });
-
-        if (outlinePoints.length < 3) {
-            // Single point - draw a dot
-            if (stroke.points.length > 0) {
-                ctx.beginPath();
-                ctx.arc(stroke.points[0].x, stroke.points[0].y, stroke.size / 2, 0, Math.PI * 2);
-                ctx.fillStyle = stroke.color;
-                ctx.globalAlpha = stroke.opacity;
-                ctx.globalCompositeOperation = stroke.tool === 'highlighter' ? 'multiply' : 'source-over';
-                ctx.fill();
-                ctx.globalCompositeOperation = 'source-over';
-                ctx.globalAlpha = 1;
-            }
-            return;
-        }
-
-        ctx.beginPath();
-        ctx.moveTo(outlinePoints[0][0], outlinePoints[0][1]);
-        for (let i = 1; i < outlinePoints.length; i++) {
-            ctx.lineTo(outlinePoints[i][0], outlinePoints[i][1]);
-        }
-        ctx.closePath();
-
-        ctx.fillStyle = stroke.color;
-        ctx.globalAlpha = stroke.opacity;
-        ctx.globalCompositeOperation = stroke.tool === 'highlighter' ? 'multiply' : 'source-over';
-        ctx.fill();
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.globalAlpha = 1;
-
-        bakedStrokeIdsRef.current.add(stroke.id);
-    }, []);
-
-    // Rebake all strokes (used after resize or stroke deletion)
-    const rebakeAllStrokes = useCallback(() => {
-        const offscreen = offscreenCanvasRef.current;
-        if (!offscreen) return;
-
-        const ctx = offscreen.getContext('2d');
-        if (!ctx) return;
-
-        // Clear offscreen canvas
-        ctx.clearRect(0, 0, offscreen.width, offscreen.height);
-        bakedStrokeIdsRef.current.clear();
-
-        // Bake all strokes from React state
-        for (const stroke of strokesRef.current) {
-            bakeStroke(stroke);
-        }
-
-        // Render to main canvas
-        renderToMainCanvas();
-    }, [bakeStroke]);
-
-    // Render offscreen buffer + active stroke to main canvas
-    const renderToMainCanvas = useCallback(() => {
-        const canvas = canvasRef.current;
-        const offscreen = offscreenCanvasRef.current;
-        if (!canvas || !offscreen) return;
-
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-
-        // Clear main canvas
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        // Draw offscreen buffer (all completed strokes)
-        ctx.drawImage(offscreen, 0, 0);
-    }, []);
-
-    // Draw active stroke on main canvas (on top of offscreen buffer)
+    // Draw active stroke on canvas using simple line rendering
     const drawActiveStroke = useCallback(() => {
         const canvas = canvasRef.current;
-        const offscreen = offscreenCanvasRef.current;
         const ts = toolStateRef.current;
-        if (!canvas || !offscreen) return;
+        if (!canvas) return;
 
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
-        // Clear and draw offscreen buffer
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(offscreen, 0, 0);
 
-        // Draw active stroke on top
         if (pointsRef.current.length === 0) return;
+
+        const size = ts.activeTool === 'eraser' ? ts.eraserSize : ts.size;
+        const color = ts.activeTool === 'eraser' ? '#FFFFFF' : ts.color;
+        const opacity = ts.activeTool === 'highlighter' ? 0.3 : ts.opacity;
+
+        ctx.strokeStyle = color;
+        ctx.lineWidth = size;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.globalAlpha = opacity;
+
+        if (ts.activeTool === 'highlighter') {
+            ctx.globalCompositeOperation = 'multiply';
+        } else {
+            ctx.globalCompositeOperation = 'source-over';
+        }
+
+        // Draw using simple quadratic bezier curves (like Amanote)
+        ctx.beginPath();
 
         if (pointsRef.current.length === 1) {
             const pt = pointsRef.current[0];
-            const size = ts.activeTool === 'eraser' ? ts.eraserSize : ts.size;
-            ctx.beginPath();
             ctx.arc(pt.x, pt.y, size / 2, 0, Math.PI * 2);
-            ctx.fillStyle = ts.activeTool === 'eraser' ? '#FFFFFF' : ts.color;
-            ctx.globalAlpha = ts.activeTool === 'highlighter' ? 0.3 : ts.opacity;
             ctx.fill();
-            ctx.globalAlpha = 1;
-            return;
+        } else {
+            ctx.moveTo(pointsRef.current[0].x, pointsRef.current[0].y);
+
+            for (let i = 1; i < pointsRef.current.length - 1; i++) {
+                const p0 = pointsRef.current[i];
+                const p1 = pointsRef.current[i + 1];
+                const midX = (p0.x + p1.x) / 2;
+                const midY = (p0.y + p1.y) / 2;
+                ctx.quadraticCurveTo(p0.x, p0.y, midX, midY);
+            }
+
+            // End at last point
+            const lastPoint = pointsRef.current[pointsRef.current.length - 1];
+            ctx.lineTo(lastPoint.x, lastPoint.y);
+            ctx.stroke();
         }
 
-        const outlinePoints = getStroke(pointsRef.current, {
-            size: ts.activeTool === 'eraser' ? ts.eraserSize : ts.size,
-            thinning: ts.activeTool === 'pen' ? 0.5 : 0,
-            smoothing: 0.5,
-            streamline: 0.5,
-            simulatePressure: ts.activeTool !== 'highlighter',
-        });
-
-        if (outlinePoints.length < 3) return;
-
-        ctx.beginPath();
-        ctx.moveTo(outlinePoints[0][0], outlinePoints[0][1]);
-        for (let i = 1; i < outlinePoints.length; i++) {
-            ctx.lineTo(outlinePoints[i][0], outlinePoints[i][1]);
-        }
-        ctx.closePath();
-
-        ctx.fillStyle = ts.activeTool === 'eraser' ? '#FFFFFF' : ts.color;
-        ctx.globalAlpha = ts.activeTool === 'highlighter' ? 0.3 : ts.opacity;
-        ctx.globalCompositeOperation = ts.activeTool === 'highlighter' ? 'multiply' : 'source-over';
-        ctx.fill();
         ctx.globalCompositeOperation = 'source-over';
         ctx.globalAlpha = 1;
     }, []);
-
-    // When strokes from React change, sync any new ones to offscreen canvas
-    useEffect(() => {
-        const offscreen = offscreenCanvasRef.current;
-        if (!offscreen) return;
-
-        // Check for deletions - if a baked stroke is no longer in strokes array, rebake all
-        const currentStrokeIds = new Set(strokes.map(s => s.id));
-        let needsRebake = false;
-
-        for (const bakedId of bakedStrokeIdsRef.current) {
-            if (!currentStrokeIds.has(bakedId)) {
-                needsRebake = true;
-                break;
-            }
-        }
-
-        if (needsRebake) {
-            rebakeAllStrokes();
-        } else {
-            // Just bake any new strokes
-            for (const stroke of strokes) {
-                if (!bakedStrokeIdsRef.current.has(stroke.id)) {
-                    bakeStroke(stroke);
-                }
-            }
-            renderToMainCanvas();
-        }
-    }, [strokes, bakeStroke, rebakeAllStrokes, renderToMainCanvas]);
 
     // Native event handlers
     useEffect(() => {
@@ -361,7 +253,7 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
 
             const ts = toolStateRef.current;
 
-            // Release pointer capture FIRST
+            // Release pointer capture FIRST - this is critical for fast pen lifts
             const pointerIdToRelease = activePointerIdRef.current;
             if (pointerIdToRelease !== null) {
                 try {
@@ -378,26 +270,22 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
                 rafId.current = null;
             }
 
+            // Clear canvas immediately - SVG will show the stroke
+            const ctx = canvas.getContext('2d');
+            ctx?.clearRect(0, 0, canvas.width, canvas.height);
+
             const strokePoints = [...pointsRef.current];
             pointsRef.current = [];
 
             if (ts.activeTool === 'eraser' && ts.eraserMode === 'whole') {
-                renderToMainCanvas();
                 return;
             }
 
             if (strokePoints.length > 0) {
                 const isEraser = ts.activeTool === 'eraser';
 
-                // Pre-compute pathData
-                const outlinePoints = getStroke(strokePoints, {
-                    size: isEraser ? ts.eraserSize : ts.size,
-                    thinning: ts.activeTool === 'pen' ? 0.5 : 0,
-                    smoothing: 0.5,
-                    streamline: 0.5,
-                    simulatePressure: ts.activeTool !== 'highlighter',
-                });
-                const pathData = getSvgPathFromStroke(outlinePoints);
+                // Generate simple SVG path (Amanote-style) - much faster than getStroke
+                const pathData = generateSmoothPath(strokePoints);
 
                 const stroke: Stroke = {
                     id: crypto.randomUUID(),
@@ -410,16 +298,8 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
                     pathData: pathData
                 };
 
-                // IMMEDIATE: Bake stroke to offscreen canvas (one draw operation)
-                bakeStroke(stroke);
-
-                // Render to main canvas (just one drawImage call)
-                renderToMainCanvas();
-
-                // Defer sync to React
-                setTimeout(() => {
-                    onStrokeCompleteRef.current(stroke);
-                }, 0);
+                // Immediate commit - no deferral needed with simple path
+                onStrokeCompleteRef.current(stroke);
             }
         };
 
@@ -436,7 +316,7 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             canvas.removeEventListener('pointerleave', handlePointerUp);
             canvas.removeEventListener('pointercancel', handlePointerUp);
         };
-    }, [drawActiveStroke, bakeStroke, renderToMainCanvas]);
+    }, [drawActiveStroke]);
 
     const getCursor = () => {
         if (toolState.activeTool === 'eraser') {
@@ -448,13 +328,39 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     };
 
     return (
-        <canvas
-            ref={canvasRef}
-            className="absolute inset-0 w-full h-full touch-none select-none"
-            style={{
-                cursor: getCursor(),
-                touchAction: 'none'
-            }}
-        />
+        <>
+            {/* SVG layer for completed strokes - uses stroke paths like Amanote */}
+            <svg
+                ref={svgRef}
+                className="absolute inset-0 w-full h-full pointer-events-none"
+                style={{ overflow: 'visible' }}
+            >
+                {strokes.map((stroke) => (
+                    <path
+                        key={stroke.id}
+                        d={stroke.pathData || generateSmoothPath(stroke.points)}
+                        stroke={stroke.color}
+                        strokeWidth={stroke.size}
+                        opacity={stroke.opacity}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        fill="none"
+                        style={{
+                            mixBlendMode: stroke.tool === 'highlighter' ? 'multiply' : 'normal'
+                        }}
+                    />
+                ))}
+            </svg>
+
+            {/* Canvas layer for active stroke only */}
+            <canvas
+                ref={canvasRef}
+                className="absolute inset-0 w-full h-full touch-none select-none"
+                style={{
+                    cursor: getCursor(),
+                    touchAction: 'none'
+                }}
+            />
+        </>
     );
 });
