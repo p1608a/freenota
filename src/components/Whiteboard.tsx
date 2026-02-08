@@ -1,7 +1,7 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useCallback } from "react";
 import { useNoteStore, type Stroke, type PaperSize, type PaperTemplate } from "../store/noteStore";
 import { Toolbar } from "./Toolbar";
-import { CanvasLayer } from "./CanvasLayer";
+import { CanvasLayer, generateSmoothPath } from "./CanvasLayer";
 import clsx from "clsx";
 
 // --- Utilities for Display ---
@@ -48,7 +48,29 @@ const getPatternStyle = (template: PaperTemplate) => {
     }
 };
 
-// SVG components removed - CanvasLayer now handles all stroke rendering for performance
+// SVG stroke rendering - completely separate from input handling
+const StrokeSVG = React.memo(({ strokes }: { strokes: Stroke[] }) => (
+    <svg
+        className="absolute inset-0 w-full h-full pointer-events-none"
+        style={{ overflow: 'visible', zIndex: 5 }}
+    >
+        {strokes.map((stroke) => (
+            <path
+                key={stroke.id}
+                d={stroke.pathData || generateSmoothPath(stroke.points)}
+                stroke={stroke.color}
+                strokeWidth={stroke.size}
+                opacity={stroke.opacity}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                fill="none"
+                style={{
+                    mixBlendMode: stroke.tool === 'highlighter' ? 'multiply' : 'normal'
+                }}
+            />
+        ))}
+    </svg>
+));
 
 export const Whiteboard: React.FC = () => {
     // Select only what we need to minimize re-renders
@@ -65,17 +87,24 @@ export const Whiteboard: React.FC = () => {
     const strokes = activePage?.strokes || [];
 
     // Memoize handlers to prevent CanvasLayer re-renders
-    const handleStrokeComplete = React.useCallback((stroke: Stroke) => {
+    const handleStrokeComplete = useCallback((stroke: Stroke) => {
         if (activePageId) {
             addStroke(activePageId, stroke);
         }
     }, [activePageId, addStroke]);
 
-    const handleDeleteStroke = React.useCallback((strokeId: string) => {
+    const handleDeleteStroke = useCallback((strokeId: string) => {
         if (activePageId) {
             deleteStroke(activePageId, strokeId);
         }
     }, [activePageId, deleteStroke]);
+
+    // Function to get strokes - used by CanvasLayer for eraser without causing re-renders
+    const getStrokes = useCallback(() => {
+        if (!activeNotebook || !activePageId) return [];
+        const page = activeNotebook.pages.find(p => p.id === activePageId);
+        return page?.strokes || [];
+    }, [activeNotebook, activePageId]);
 
     if (!activeNotebook) return <div className="p-10 text-gray-400">No Notebook Open</div>;
 
@@ -96,14 +125,16 @@ export const Whiteboard: React.FC = () => {
                     ...getPatternStyle(activeNotebook.paperTemplate)
                 }}
             >
+                {/* SVG layer for completed strokes - separate component, re-renders independently */}
+                <StrokeSVG strokes={strokes} />
+
+                {/* Canvas layer for input only - does NOT receive strokes, won't re-render */}
                 <CanvasLayer
                     activePageId={activePageId}
                     toolState={toolState}
-                    strokes={strokes}
-                    width={typeof paperDims.width === 'number' ? paperDims.width : '100%'}
-                    height={typeof paperDims.height === 'number' ? paperDims.height : '100%'}
                     onStrokeComplete={handleStrokeComplete}
                     onDeleteStroke={handleDeleteStroke}
+                    getStrokes={getStrokes}
                 />
             </div>
         </div>

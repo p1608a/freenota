@@ -4,17 +4,15 @@ import { type Stroke, type ToolState } from '../store/noteStore';
 interface CanvasLayerProps {
     activePageId: string | null;
     toolState: ToolState;
-    strokes: Stroke[];
-    width: number | string;
-    height: number | string;
     onStrokeComplete: (stroke: Stroke) => void;
     onDeleteStroke: (strokeId: string) => void;
+    getStrokes: () => Stroke[]; // Function to get strokes - avoids prop changes
 }
 
 /**
  * Generate SVG path data using quadratic bezier curves
  */
-function generateSmoothPath(points: { x: number, y: number, pressure?: number }[]): string {
+export function generateSmoothPath(points: { x: number, y: number, pressure?: number }[]): string {
     if (points.length === 0) return '';
     if (points.length === 1) {
         return `M ${points[0].x} ${points[0].y} L ${points[0].x} ${points[0].y}`;
@@ -40,23 +38,20 @@ function generateSmoothPath(points: { x: number, y: number, pressure?: number }[
 }
 
 /**
- * CanvasLayer - Aggressive event handling WITHOUT pointer capture
+ * CanvasLayer - PURE INPUT HANDLER
  * 
- * CRITICAL CHANGE: Removed setPointerCapture/releasePointerCapture entirely.
- * Some drawing apps don't use it - they just track button state.
- * Pointer capture can cause browser-level delays that drop fast strokes.
+ * This component ONLY handles pointer input and renders the active stroke.
+ * It does NOT receive strokes as a prop, so it NEVER re-renders when strokes change.
+ * This ensures that pointer events are never blocked by React re-renders.
  */
 export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     activePageId,
     toolState,
-    strokes,
-    width,
-    height,
     onStrokeComplete,
-    onDeleteStroke
+    onDeleteStroke,
+    getStrokes
 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const svgRef = useRef<SVGSVGElement>(null);
 
     const pointsRef = useRef<{ x: number, y: number, pressure: number }[]>([]);
     const isDrawingRef = useRef(false);
@@ -65,15 +60,15 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     // Store refs to current props
     const toolStateRef = useRef(toolState);
     const activePageIdRef = useRef(activePageId);
-    const strokesRef = useRef(strokes);
     const onStrokeCompleteRef = useRef(onStrokeComplete);
     const onDeleteStrokeRef = useRef(onDeleteStroke);
+    const getStrokesRef = useRef(getStrokes);
 
     useEffect(() => { toolStateRef.current = toolState; }, [toolState]);
     useEffect(() => { activePageIdRef.current = activePageId; }, [activePageId]);
-    useEffect(() => { strokesRef.current = strokes; }, [strokes]);
     useEffect(() => { onStrokeCompleteRef.current = onStrokeComplete; }, [onStrokeComplete]);
     useEffect(() => { onDeleteStrokeRef.current = onDeleteStroke; }, [onDeleteStroke]);
+    useEffect(() => { getStrokesRef.current = getStrokes; }, [getStrokes]);
 
     // Canvas resize handling
     useEffect(() => {
@@ -100,7 +95,7 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             window.removeEventListener('resize', updateCanvasSize);
             resizeObserver.disconnect();
         };
-    }, [width, height]);
+    }, []);
 
     // Draw active stroke on canvas
     const drawActiveStroke = useCallback(() => {
@@ -200,7 +195,7 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         }
     }, []);
 
-    // Native event handlers - NO POINTER CAPTURE
+    // Native event handlers
     useEffect(() => {
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -222,7 +217,6 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
                 commitStroke();
             }
 
-            // NO setPointerCapture - just start drawing immediately
             isDrawingRef.current = true;
 
             const rect = canvas.getBoundingClientRect();
@@ -243,7 +237,6 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         };
 
         const handlePointerMove = (e: PointerEvent) => {
-            // Only process if button is down (for stylus/mouse)
             if (e.buttons === 0 && e.pointerType !== 'touch') return;
 
             e.preventDefault();
@@ -267,7 +260,7 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
 
                 if (ts.activeTool === 'eraser' && ts.eraserMode === 'whole') {
                     const eraseRadius = ts.eraserSize;
-                    strokesRef.current.forEach(s => {
+                    getStrokesRef.current().forEach(s => {
                         const hit = s.points.some((p, i) => i % 4 === 0 && Math.hypot(p.x - pt.x, p.y - pt.y) < eraseRadius);
                         if (hit) onDeleteStrokeRef.current(s.id);
                     });
@@ -293,11 +286,9 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
 
             if (!isDrawingRef.current || !activePageIdRef.current) return;
 
-            // NO releasePointerCapture - just commit immediately
             commitStroke();
         };
 
-        // Listen on document level for pointerup to catch strokes that end outside canvas
         const handleDocumentPointerUp = () => {
             if (isDrawingRef.current && pointsRef.current.length > 0) {
                 commitStroke();
@@ -327,39 +318,21 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     };
 
     return (
-        <>
-            {/* SVG layer for completed strokes */}
-            <svg
-                ref={svgRef}
-                className="absolute inset-0 w-full h-full pointer-events-none"
-                style={{ overflow: 'visible' }}
-            >
-                {strokes.map((stroke) => (
-                    <path
-                        key={stroke.id}
-                        d={stroke.pathData || generateSmoothPath(stroke.points)}
-                        stroke={stroke.color}
-                        strokeWidth={stroke.size}
-                        opacity={stroke.opacity}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        fill="none"
-                        style={{
-                            mixBlendMode: stroke.tool === 'highlighter' ? 'multiply' : 'normal'
-                        }}
-                    />
-                ))}
-            </svg>
-
-            {/* Canvas layer for active stroke only */}
-            <canvas
-                ref={canvasRef}
-                className="absolute inset-0 w-full h-full touch-none select-none"
-                style={{
-                    cursor: getCursor(),
-                    touchAction: 'none'
-                }}
-            />
-        </>
+        <canvas
+            ref={canvasRef}
+            className="absolute inset-0 w-full h-full touch-none select-none"
+            style={{
+                cursor: getCursor(),
+                touchAction: 'none',
+                zIndex: 10 // Above SVG layer
+            }}
+        />
+    );
+}, (prevProps, nextProps) => {
+    // Custom comparison - only re-render if these specific props change
+    // Ignore getStrokes function changes
+    return (
+        prevProps.activePageId === nextProps.activePageId &&
+        prevProps.toolState === nextProps.toolState
     );
 });
