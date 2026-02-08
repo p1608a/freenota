@@ -25,6 +25,7 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     const pointsRef = useRef<{ x: number, y: number, pressure: number }[]>([]);
     const isDrawingRef = useRef(false);
     const rafId = useRef<number | null>(null);
+    const activePointerIdRef = useRef<number | null>(null); // Track active pointer for proper release
 
     // Initial canvas setup and resize handling
     useEffect(() => {
@@ -126,7 +127,12 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         if (!activePageId) return;
         if (toolState.activeTool === 'select' || toolState.activeTool === 'laser') return;
 
+        // If we're already tracking a pointer, ignore new pointerdown events
+        // This prevents interference from duplicate events (mouse + touch + pointer)
+        if (activePointerIdRef.current !== null) return;
+
         (e.target as Element).setPointerCapture(e.pointerId);
+        activePointerIdRef.current = e.pointerId; // Store pointer ID for release
         isDrawingRef.current = true;
 
         if (canvasRef.current) {
@@ -234,6 +240,16 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
         }
         pointsRef.current = [];
+
+        // CRITICAL: Release pointer capture to allow next pointerdown to fire immediately
+        if (activePointerIdRef.current !== null && canvasRef.current) {
+            try {
+                canvasRef.current.releasePointerCapture(activePointerIdRef.current);
+            } catch (e) {
+                // Pointer may already be released, ignore error
+            }
+            activePointerIdRef.current = null;
+        }
     };
 
     const getCursor = () => {
