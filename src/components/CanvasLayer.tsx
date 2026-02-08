@@ -12,8 +12,7 @@ interface CanvasLayerProps {
 }
 
 /**
- * Generate SVG path data using quadratic bezier curves (Amanote-style)
- * Much simpler and faster than perfect-freehand polygon calculations
+ * Generate SVG path data using quadratic bezier curves
  */
 function generateSmoothPath(points: { x: number, y: number, pressure?: number }[]): string {
     if (points.length === 0) return '';
@@ -24,21 +23,16 @@ function generateSmoothPath(points: { x: number, y: number, pressure?: number }[
         return `M ${points[0].x} ${points[0].y} L ${points[1].x},${points[1].y}`;
     }
 
-    // Start at first point
     let path = `M ${points[0].x} ${points[0].y}`;
 
-    // Use quadratic bezier curves for smooth connections
     for (let i = 1; i < points.length - 1; i++) {
         const p0 = points[i];
         const p1 = points[i + 1];
-        // Midpoint between current and next point
         const midX = (p0.x + p1.x) / 2;
         const midY = (p0.y + p1.y) / 2;
-        // Quadratic bezier: Q controlX,controlY endX,endY
         path += ` Q ${p0.x},${p0.y} ${midX},${midY}`;
     }
 
-    // End at last point
     const lastPoint = points[points.length - 1];
     path += ` L ${lastPoint.x},${lastPoint.y}`;
 
@@ -46,11 +40,11 @@ function generateSmoothPath(points: { x: number, y: number, pressure?: number }[
 }
 
 /**
- * CanvasLayer - Hybrid rendering with SVG paths (Amanote-style)
+ * CanvasLayer - Aggressive event handling WITHOUT pointer capture
  * 
- * Key insight from Amanote: Use SVG <path> with stroke attribute and
- * quadratic bezier curves. This is MUCH faster than perfect-freehand
- * because there's no polygon calculation - just simple path building.
+ * CRITICAL CHANGE: Removed setPointerCapture/releasePointerCapture entirely.
+ * Some drawing apps don't use it - they just track button state.
+ * Pointer capture can cause browser-level delays that drop fast strokes.
  */
 export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     activePageId,
@@ -67,7 +61,6 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     const pointsRef = useRef<{ x: number, y: number, pressure: number }[]>([]);
     const isDrawingRef = useRef(false);
     const rafId = useRef<number | null>(null);
-    const activePointerIdRef = useRef<number | null>(null);
 
     // Store refs to current props
     const toolStateRef = useRef(toolState);
@@ -109,7 +102,7 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         };
     }, [width, height]);
 
-    // Draw active stroke on canvas using simple line rendering
+    // Draw active stroke on canvas
     const drawActiveStroke = useCallback(() => {
         const canvas = canvasRef.current;
         const ts = toolStateRef.current;
@@ -138,7 +131,6 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             ctx.globalCompositeOperation = 'source-over';
         }
 
-        // Draw using simple quadratic bezier curves (like Amanote)
         ctx.beginPath();
 
         if (pointsRef.current.length === 1) {
@@ -156,7 +148,6 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
                 ctx.quadraticCurveTo(p0.x, p0.y, midX, midY);
             }
 
-            // End at last point
             const lastPoint = pointsRef.current[pointsRef.current.length - 1];
             ctx.lineTo(lastPoint.x, lastPoint.y);
             ctx.stroke();
@@ -166,7 +157,50 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         ctx.globalAlpha = 1;
     }, []);
 
-    // Native event handlers
+    // Commit current stroke and reset state
+    const commitStroke = useCallback(() => {
+        const ts = toolStateRef.current;
+        const canvas = canvasRef.current;
+
+        if (rafId.current) {
+            cancelAnimationFrame(rafId.current);
+            rafId.current = null;
+        }
+
+        // Clear canvas
+        if (canvas) {
+            const ctx = canvas.getContext('2d');
+            ctx?.clearRect(0, 0, canvas.width, canvas.height);
+        }
+
+        const strokePoints = [...pointsRef.current];
+        pointsRef.current = [];
+        isDrawingRef.current = false;
+
+        if (ts.activeTool === 'eraser' && ts.eraserMode === 'whole') {
+            return;
+        }
+
+        if (strokePoints.length > 0) {
+            const isEraser = ts.activeTool === 'eraser';
+            const pathData = generateSmoothPath(strokePoints);
+
+            const stroke: Stroke = {
+                id: crypto.randomUUID(),
+                points: strokePoints,
+                color: isEraser ? '#FFFFFF' : ts.color,
+                size: isEraser ? ts.eraserSize : ts.size,
+                opacity: ts.activeTool === 'highlighter' ? 0.3 : ts.opacity,
+                tool: ts.activeTool,
+                isComplete: true,
+                pathData: pathData
+            };
+
+            onStrokeCompleteRef.current(stroke);
+        }
+    }, []);
+
+    // Native event handlers - NO POINTER CAPTURE
     useEffect(() => {
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -177,14 +211,18 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
 
             const ts = toolStateRef.current;
 
+            // Palm rejection
             if (e.pointerType === 'touch' && (e.width > 20 || e.height > 20)) return;
             if (ts.onlyPen && e.pointerType !== 'pen') return;
             if (!activePageIdRef.current) return;
             if (ts.activeTool === 'select' || ts.activeTool === 'laser') return;
-            if (activePointerIdRef.current !== null) return;
 
-            canvas.setPointerCapture(e.pointerId);
-            activePointerIdRef.current = e.pointerId;
+            // If already drawing, commit the previous stroke first
+            if (isDrawingRef.current && pointsRef.current.length > 0) {
+                commitStroke();
+            }
+
+            // NO setPointerCapture - just start drawing immediately
             isDrawingRef.current = true;
 
             const rect = canvas.getBoundingClientRect();
@@ -205,6 +243,9 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         };
 
         const handlePointerMove = (e: PointerEvent) => {
+            // Only process if button is down (for stylus/mouse)
+            if (e.buttons === 0 && e.pointerType !== 'touch') return;
+
             e.preventDefault();
             e.stopPropagation();
 
@@ -238,7 +279,6 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
 
             if (ts.activeTool === 'eraser' && ts.eraserMode === 'whole') return;
 
-            // Throttled drawing
             if (!rafId.current) {
                 rafId.current = requestAnimationFrame(() => {
                     drawActiveStroke();
@@ -251,72 +291,31 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             e.preventDefault();
             e.stopPropagation();
 
-            const ts = toolStateRef.current;
-
-            // Release pointer capture FIRST - this is critical for fast pen lifts
-            const pointerIdToRelease = activePointerIdRef.current;
-            if (pointerIdToRelease !== null) {
-                try {
-                    canvas.releasePointerCapture(pointerIdToRelease);
-                } catch (err) { }
-            }
-            activePointerIdRef.current = null;
-
             if (!isDrawingRef.current || !activePageIdRef.current) return;
-            isDrawingRef.current = false;
 
-            if (rafId.current) {
-                cancelAnimationFrame(rafId.current);
-                rafId.current = null;
-            }
+            // NO releasePointerCapture - just commit immediately
+            commitStroke();
+        };
 
-            // Clear canvas immediately - SVG will show the stroke
-            const ctx = canvas.getContext('2d');
-            ctx?.clearRect(0, 0, canvas.width, canvas.height);
-
-            const strokePoints = [...pointsRef.current];
-            pointsRef.current = [];
-
-            if (ts.activeTool === 'eraser' && ts.eraserMode === 'whole') {
-                return;
-            }
-
-            if (strokePoints.length > 0) {
-                const isEraser = ts.activeTool === 'eraser';
-
-                // Generate simple SVG path (Amanote-style) - much faster than getStroke
-                const pathData = generateSmoothPath(strokePoints);
-
-                const stroke: Stroke = {
-                    id: crypto.randomUUID(),
-                    points: strokePoints,
-                    color: isEraser ? '#FFFFFF' : ts.color,
-                    size: isEraser ? ts.eraserSize : ts.size,
-                    opacity: ts.activeTool === 'highlighter' ? 0.3 : ts.opacity,
-                    tool: ts.activeTool,
-                    isComplete: true,
-                    pathData: pathData
-                };
-
-                // Immediate commit - no deferral needed with simple path
-                onStrokeCompleteRef.current(stroke);
+        // Listen on document level for pointerup to catch strokes that end outside canvas
+        const handleDocumentPointerUp = () => {
+            if (isDrawingRef.current && pointsRef.current.length > 0) {
+                commitStroke();
             }
         };
 
         canvas.addEventListener('pointerdown', handlePointerDown, { passive: false });
         canvas.addEventListener('pointermove', handlePointerMove, { passive: false });
         canvas.addEventListener('pointerup', handlePointerUp, { passive: false });
-        canvas.addEventListener('pointerleave', handlePointerUp, { passive: false });
-        canvas.addEventListener('pointercancel', handlePointerUp, { passive: false });
+        document.addEventListener('pointerup', handleDocumentPointerUp);
 
         return () => {
             canvas.removeEventListener('pointerdown', handlePointerDown);
             canvas.removeEventListener('pointermove', handlePointerMove);
             canvas.removeEventListener('pointerup', handlePointerUp);
-            canvas.removeEventListener('pointerleave', handlePointerUp);
-            canvas.removeEventListener('pointercancel', handlePointerUp);
+            document.removeEventListener('pointerup', handleDocumentPointerUp);
         };
-    }, [drawActiveStroke]);
+    }, [drawActiveStroke, commitStroke]);
 
     const getCursor = () => {
         if (toolState.activeTool === 'eraser') {
@@ -329,7 +328,7 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
 
     return (
         <>
-            {/* SVG layer for completed strokes - uses stroke paths like Amanote */}
+            {/* SVG layer for completed strokes */}
             <svg
                 ref={svgRef}
                 className="absolute inset-0 w-full h-full pointer-events-none"
