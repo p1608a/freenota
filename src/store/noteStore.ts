@@ -21,6 +21,7 @@ export interface Stroke {
     opacity: number;
     tool: ToolType;
     isComplete: boolean;
+    pathData?: string; // Pre-computed SVG path for instant rendering
 }
 
 export interface ToolState {

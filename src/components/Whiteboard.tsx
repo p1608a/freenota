@@ -50,16 +50,19 @@ const getPatternStyle = (template: PaperTemplate) => {
     }
 };
 
-// SVG Stroke for static items
+// SVG Stroke for static items - uses pre-computed pathData for performance
 const StrokePath = React.memo(({ stroke }: { stroke: Stroke }) => {
-    const outlinePoints = getStroke(stroke.points, {
-        size: stroke.size,
-        thinning: stroke.tool === 'pen' ? 0.5 : 0,
-        smoothing: 0.5,
-        streamline: 0.5,
-        simulatePressure: stroke.tool !== 'highlighter',
-    });
-    const pathData = getSvgPathFromStroke(outlinePoints);
+    // Use pre-computed pathData if available, otherwise compute on-demand (for legacy strokes)
+    const pathData = stroke.pathData ?? (() => {
+        const outlinePoints = getStroke(stroke.points, {
+            size: stroke.size,
+            thinning: stroke.tool === 'pen' ? 0.5 : 0,
+            smoothing: 0.5,
+            streamline: 0.5,
+            simulatePressure: stroke.tool !== 'highlighter',
+        });
+        return getSvgPathFromStroke(outlinePoints);
+    })();
 
     return (
         <path

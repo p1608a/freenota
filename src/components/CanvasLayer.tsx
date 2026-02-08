@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useCallback } from 'react';
 import { getStroke } from 'perfect-freehand';
+import { getSvgPathFromStroke } from '../utils/ink';
 import { type Stroke, type ToolState } from '../store/noteStore';
 
 interface CanvasLayerProps {
@@ -265,6 +266,17 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             // Commit stroke - no setTimeout needed with native events
             if (strokePoints.length > 0) {
                 const isEraser = ts.activeTool === 'eraser';
+
+                // Pre-compute the SVG path data so rendering is instant
+                const outlinePoints = getStroke(strokePoints, {
+                    size: isEraser ? ts.eraserSize : ts.size,
+                    thinning: ts.activeTool === 'pen' ? 0.5 : 0,
+                    smoothing: 0.5,
+                    streamline: 0.5,
+                    simulatePressure: ts.activeTool !== 'highlighter',
+                });
+                const pathData = getSvgPathFromStroke(outlinePoints);
+
                 const stroke: Stroke = {
                     id: crypto.randomUUID(),
                     points: strokePoints,
@@ -272,7 +284,8 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
                     size: isEraser ? ts.eraserSize : ts.size,
                     opacity: ts.activeTool === 'highlighter' ? 0.3 : ts.opacity,
                     tool: ts.activeTool,
-                    isComplete: true
+                    isComplete: true,
+                    pathData: pathData // Pre-computed for instant SVG rendering
                 };
                 onStrokeCompleteRef.current(stroke);
             }
