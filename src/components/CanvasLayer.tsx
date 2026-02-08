@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useCallback } from 'react';
 import { type Stroke, type ToolState } from '../store/noteStore';
 
 interface CanvasLayerProps {
@@ -10,13 +10,11 @@ interface CanvasLayerProps {
 }
 
 /**
- * CanvasLayer with Web Worker + OffscreenCanvas
+ * CanvasLayer with Web Worker + Stroke Queue
  * 
- * This is the ultimate optimization for web-based drawing:
- * - ALL drawing happens in a Web Worker (separate thread)
- * - Main thread NEVER blocks, regardless of React re-renders
- * - OffscreenCanvas transfers rendering to worker thread
- * - Zero latency between pointer events and drawing
+ * CRITICAL FIX: Adds a stroke queue to prevent dropped strokes during rapid input.
+ * When strokes complete very quickly (rapid pen lifts), React state updates can
+ * interfere with each other. The queue ensures strokes are processed sequentially.
  */
 export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     activePageId,
@@ -29,6 +27,10 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     const workerRef = useRef<Worker | null>(null);
     const isDrawingRef = useRef(false);
 
+    // STROKE QUEUE - ensures no strokes are lost during rapid input
+    const strokeQueueRef = useRef<Stroke[]>([]);
+    const isProcessingQueueRef = useRef(false);
+
     const toolStateRef = useRef(toolState);
     const activePageIdRef = useRef(activePageId);
     const onStrokeCompleteRef = useRef(onStrokeComplete);
@@ -40,6 +42,39 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
     useEffect(() => { onStrokeCompleteRef.current = onStrokeComplete; }, [onStrokeComplete]);
     useEffect(() => { onDeleteStrokeRef.current = onDeleteStroke; }, [onDeleteStroke]);
     useEffect(() => { getStrokesRef.current = getStrokes; }, [getStrokes]);
+
+    // Process stroke queue sequentially to prevent race conditions
+    const processStrokeQueue = useCallback(() => {
+        if (isProcessingQueueRef.current || strokeQueueRef.current.length === 0) {
+            return;
+        }
+
+        isProcessingQueueRef.current = true;
+
+        // Process one stroke at a time
+        const processNext = () => {
+            if (strokeQueueRef.current.length === 0) {
+                isProcessingQueueRef.current = false;
+                return;
+            }
+
+            const stroke = strokeQueueRef.current.shift()!;
+
+            // Add to React state
+            onStrokeCompleteRef.current(stroke);
+
+            // Process next stroke after a tiny delay to ensure state update completes
+            requestAnimationFrame(processNext);
+        };
+
+        processNext();
+    }, []);
+
+    // Add stroke to queue instead of calling onStrokeComplete directly
+    const queueStroke = useCallback((stroke: Stroke) => {
+        strokeQueueRef.current.push(stroke);
+        processStrokeQueue();
+    }, [processStrokeQueue]);
 
     // Initialize Web Worker and OffscreenCanvas
     useEffect(() => {
@@ -61,7 +96,9 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             const { type, stroke } = e.data;
 
             if (type === 'strokeComplete') {
-                onStrokeCompleteRef.current(stroke);
+                // CRITICAL: Queue stroke instead of processing immediately
+                // This prevents dropped strokes during rapid input
+                queueStroke(stroke);
             }
         };
 
@@ -69,7 +106,7 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             worker.terminate();
             workerRef.current = null;
         };
-    }, []);
+    }, [queueStroke]);
 
     // Update canvas size
     useEffect(() => {
