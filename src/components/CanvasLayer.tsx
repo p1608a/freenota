@@ -206,6 +206,18 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
         e.preventDefault();
         e.stopPropagation();
 
+        // CRITICAL: Release pointer capture FIRST - this must happen before anything else
+        // to allow the browser to immediately accept the next pointerdown event
+        const pointerIdToRelease = activePointerIdRef.current;
+        if (pointerIdToRelease !== null && canvasRef.current) {
+            try {
+                canvasRef.current.releasePointerCapture(pointerIdToRelease);
+            } catch (err) {
+                // Pointer may already be released
+            }
+        }
+        activePointerIdRef.current = null;
+
         if (!isDrawingRef.current || !activePageId) return;
         isDrawingRef.current = false;
 
@@ -214,41 +226,39 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             rafId.current = null;
         }
 
+        // Clear canvas immediately for visual responsiveness
+        if (canvasRef.current) {
+            const ctx = canvasRef.current.getContext('2d');
+            ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+        }
+
+        // Capture points before clearing
+        const strokePoints = [...pointsRef.current];
+        pointsRef.current = [];
+
         if (toolState.activeTool === 'eraser' && toolState.eraserMode === 'whole') {
-            pointsRef.current = [];
             return;
         }
 
-        // Commit stroke
-        if (pointsRef.current.length > 0) {
+        // CRITICAL: Defer the stroke commit using setTimeout(0)
+        // This allows the browser's event loop to process any pending pointerdown
+        // events BEFORE React triggers a re-render from the state update
+        if (strokePoints.length > 0) {
             const isEraser = toolState.activeTool === 'eraser';
             const stroke: Stroke = {
                 id: crypto.randomUUID(),
-                points: [...pointsRef.current],
+                points: strokePoints,
                 color: isEraser ? '#FFFFFF' : toolState.color,
                 size: isEraser ? toolState.eraserSize : toolState.size,
                 opacity: toolState.activeTool === 'highlighter' ? 0.3 : toolState.opacity,
                 tool: toolState.activeTool,
                 isComplete: true
             };
-            onStrokeComplete(stroke);
-        }
 
-        // Clear canvas
-        if (canvasRef.current) {
-            const ctx = canvasRef.current.getContext('2d');
-            ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-        }
-        pointsRef.current = [];
-
-        // CRITICAL: Release pointer capture to allow next pointerdown to fire immediately
-        if (activePointerIdRef.current !== null && canvasRef.current) {
-            try {
-                canvasRef.current.releasePointerCapture(activePointerIdRef.current);
-            } catch (e) {
-                // Pointer may already be released, ignore error
-            }
-            activePointerIdRef.current = null;
+            // Defer to next event loop tick - browser can process next pointerdown first
+            setTimeout(() => {
+                onStrokeComplete(stroke);
+            }, 0);
         }
     };
 
