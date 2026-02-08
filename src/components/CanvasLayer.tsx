@@ -136,6 +136,9 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
             const rect = canvas.getBoundingClientRect();
             const events = e.getCoalescedEvents?.() || [e];
 
+            // Safety check for empty coalesced events
+            if (!events || events.length === 0) return;
+
             const point = {
                 x: events[0].clientX - rect.left,
                 y: events[0].clientY - rect.top,
@@ -163,6 +166,9 @@ export const CanvasLayer: React.FC<CanvasLayerProps> = React.memo(({
 
             const rect = canvas.getBoundingClientRect();
             const events = e.getCoalescedEvents?.() || [e];
+
+            // Safety check for coalesced events
+            if (!events || events.length === 0) return;
 
             const points = events.map(ev => ({
                 x: ev.clientX - rect.left,
